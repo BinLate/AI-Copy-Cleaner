@@ -349,6 +349,105 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
+// 16. Programmatic Clipboard Interception & Startup Cache Synchronization
+it('Validates inject.js programmatic clipboard interception respects cached and live disabled state', async () => {
+  let capturedClipboardWrite = null;
+  let capturedDataTransfer = null;
+
+  class MockDataTransfer {
+    setData(format, data) {
+      capturedDataTransfer = { format, data };
+    }
+  }
+
+  class MockBlob {
+    constructor(parts, opts) {
+      this.parts = parts;
+      this.type = opts?.type;
+    }
+    async text() {
+      return this.parts.join('');
+    }
+  }
+
+  class MockClipboardItem {
+    constructor(types) {
+      this.types = Object.keys(types);
+      this._types = types;
+    }
+    async getType(t) {
+      return this._types[t];
+    }
+  }
+
+  let localStore = new Map();
+  const mockLocalStorage = {
+    getItem: (k) => localStore.get(k) || null,
+    setItem: (k, v) => localStore.set(k, String(v)),
+    removeItem: (k) => localStore.delete(k)
+  };
+
+  const sandbox = {
+    window: {
+      addEventListener: () => {},
+      dispatchEvent: () => {}
+    },
+    document: {
+      documentElement: { dataset: {} }
+    },
+    localStorage: mockLocalStorage,
+    navigator: {
+      clipboard: {
+        write: async (items) => {
+          capturedClipboardWrite = items;
+          return items;
+        }
+      }
+    },
+    DataTransfer: MockDataTransfer,
+    Blob: MockBlob,
+    ClipboardItem: MockClipboardItem,
+    cleanAIHtml: cleanAIHtml,
+    console: console
+  };
+  sandbox.window.DataTransfer = MockDataTransfer;
+  sandbox.globalThis = sandbox.window;
+
+  // Case A: Default state (enabled) -> inject.js sanitizes clipboard.write and DataTransfer
+  const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
+  vm.runInNewContext(injectCode, sandbox);
+
+  const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
+  const item = new MockClipboardItem({
+    'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+  });
+
+  await sandbox.navigator.clipboard.write([item]);
+  const writtenBlob = await capturedClipboardWrite[0].getType('text/html');
+  const writtenText = await writtenBlob.text();
+  assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned by inject.js when enabled');
+
+  const dt = new MockDataTransfer();
+  sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled');
+
+  // Case B: Synchronously disabled via localStorage cache -> leaves HTML byte-for-byte untouched
+  mockLocalStorage.setItem('aicc_clean_config', JSON.stringify({ enabled: false }));
+  capturedClipboardWrite = null;
+  capturedDataTransfer = null;
+
+  const itemDisabled = new MockClipboardItem({
+    'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+  });
+  await sandbox.navigator.clipboard.write([itemDisabled]);
+  const untouchedBlob = await capturedClipboardWrite[0].getType('text/html');
+  const untouchedText = await untouchedBlob.text();
+  assert.strictEqual(untouchedText, dirtyHtml, 'HTML must remain unchanged when disabled via localStorage cache');
+
+  sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via cache');
+});
+
 console.log(`\n========================================`);
 console.log(`Test Results: ${passed} passed, ${failed} failed`);
 console.log(`========================================\n`);

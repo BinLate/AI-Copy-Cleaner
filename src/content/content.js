@@ -3,8 +3,26 @@
   'use strict';
   let enabled = true;
 
+  // Initialize from synchronous cached storage to avoid fail-open startup race
+  try {
+    const cached = localStorage.getItem('aicc_clean_config');
+    if (cached !== null) {
+      const parsed = JSON.parse(cached);
+      enabled = parsed.enabled !== false;
+    }
+    if (document.documentElement) {
+      document.documentElement.dataset.aiccCleanEnabled = String(enabled);
+    }
+  } catch (_) {}
+
   function updateEnabled(val) {
     enabled = val !== false;
+    try {
+      localStorage.setItem('aicc_clean_config', JSON.stringify({ enabled }));
+      if (document.documentElement) {
+        document.documentElement.dataset.aiccCleanEnabled = String(enabled);
+      }
+    } catch (_) {}
   }
 
   try {

@@ -66,6 +66,9 @@ async function load() {
 
 async function save() {
   const state = currentState();
+  try {
+    localStorage.setItem('aicc_clean_config', JSON.stringify({ enabled: state.clean }));
+  } catch (_) {}
   await Promise.all([
     chrome.storage.local.set({ [OPT_KEY]: state.opt, autoCleanEnabled: state.clean }),
     chrome.storage.sync.set({ autoCleanEnabled: state.clean })

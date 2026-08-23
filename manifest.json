@@ -65,6 +65,24 @@
       ],
       "js": [
         "src/utils/sanitizer.js",
+        "src/content/inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://aistudio.google.com/*",
+        "https://*.perplexity.ai/*",
+        "https://copilot.microsoft.com/*"
+      ],
+      "js": [
+        "src/utils/sanitizer.js",
         "src/content/content.js"
       ],
       "run_at": "document_start"
