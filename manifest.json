@@ -1,0 +1,94 @@
+{
+  "manifest_version": 3,
+  "name": "AI Copy Cleaner",
+  "version": "1.6.0",
+  "description": "Clean copied AI HTML across ChatGPT, Gemini, Claude, DeepSeek, Google AI Studio & Perplexity, and reduce lag in long ChatGPT conversations.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*",
+    "https://chat.deepseek.com/*",
+    "https://aistudio.google.com/*",
+    "https://*.perplexity.ai/*",
+    "https://copilot.microsoft.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/page/pageSetup.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/page/mainWorld.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "src/content/index.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://aistudio.google.com/*",
+        "https://*.perplexity.ai/*",
+        "https://copilot.microsoft.com/*"
+      ],
+      "js": [
+        "src/utils/sanitizer.js",
+        "src/content/inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*",
+        "https://claude.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://aistudio.google.com/*",
+        "https://*.perplexity.ai/*",
+        "https://copilot.microsoft.com/*"
+      ],
+      "js": [
+        "src/utils/sanitizer.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html"
+  }
+}

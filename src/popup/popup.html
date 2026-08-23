@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI Copy Cleaner</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="popup-root">
+    <header class="header">
+      <div class="header-inner">
+        <img src="../../icons/icon128.png" class="app-icon" alt="">
+        <div class="header-copy">
+          <div class="title-row">
+            <strong>AI Copy Cleaner</strong>
+            <span class="status-dot" aria-hidden="true"></span>
+          </div>
+          <div class="subtitle">Clean copy &amp; Long Chat Booster <span id="version"></span></div>
+        </div>
+      </div>
+    </header>
+
+    <section class="feature-list">
+      <!-- Feature 1: Clean khi copy -->
+      <article class="toolkit-card feature-card">
+        <div class="feature-icon clean-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M3 21h18M5 17l8-8 4 4-8 8H5v-4Zm9-9 2-2 4 4-2 2-4-4Z"/></svg>
+        </div>
+        <div class="feature-body">
+          <div class="setting-title">Clean khi copy</div>
+          <div class="setting-description">Làm sạch HTML rác từ các nền tảng AI hàng đầu.</div>
+          <div class="platform-row">
+            <span class="badge-tag">ChatGPT</span>
+            <span class="badge-tag">Gemini</span>
+            <span class="badge-tag">Claude</span>
+            <span class="badge-tag">DeepSeek</span>
+            <span class="badge-tag">AI Studio</span>
+            <span class="badge-tag">Perplexity</span>
+            <span class="badge-tag">Copilot</span>
+          </div>
+        </div>
+        <label class="switch" title="Bật Clean khi copy">
+          <input id="cleanEnabled" type="checkbox">
+          <span class="slider"></span>
+        </label>
+      </article>
+
+      <!-- Feature 2: Long Chat Speed Booster -->
+      <article class="toolkit-card feature-card-col">
+        <div class="feature-main-row">
+          <div class="feature-icon speed-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M13 2 3 14h8l-1 8 11-13h-8l0-7Z"/></svg>
+          </div>
+          <div class="feature-body">
+            <div class="setting-title">Long Chat Speed Booster</div>
+            <div class="setting-description">Giảm lag các cuộc trò chuyện dài trên ChatGPT.</div>
+          </div>
+          <label class="switch" title="Bật giảm lag ChatGPT">
+            <input id="optimizerEnabled" type="checkbox">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div id="optimizerDetails" class="details">
+          <div class="setting-line">
+            <div class="setting-copy">
+              <span class="line-title">Lượt hỏi–đáp hiển thị</span>
+              <span class="line-hint">Ít hơn = nhẹ hơn</span>
+            </div>
+            <div class="stepper">
+              <button id="limitDec" type="button" aria-label="Giảm">−</button>
+              <input id="messageLimit" type="number" min="1" max="200" inputmode="numeric">
+              <button id="limitInc" type="button" aria-label="Tăng">+</button>
+            </div>
+          </div>
+
+          <div class="inset-divider"></div>
+
+          <div class="setting-line">
+            <div class="setting-copy">
+              <span class="line-title">Lượt hỏi–đáp tải thêm mỗi lần</span>
+              <span class="line-hint">Số tin cũ mở thêm khi bấm nút</span>
+            </div>
+            <div class="stepper">
+              <button id="stepDec" type="button" aria-label="Giảm">−</button>
+              <input id="loadStep" type="number" min="1" max="50" inputmode="numeric">
+              <button id="stepInc" type="button" aria-label="Tăng">+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="stats-strip">
+          <div class="stat-item">
+            <div class="stat-icon">⚡</div>
+            <div><strong id="limitStat">15</strong><span>Tin giữ lại</span></div>
+          </div>
+          <div class="stat-divider"></div>
+          <div class="stat-item">
+            <div class="stat-icon">↥</div>
+            <div><strong id="stepStat">5</strong><span>Tải thêm</span></div>
+          </div>
+          <div class="stat-divider"></div>
+          <div class="stat-item">
+            <div class="stat-icon">✨</div>
+            <div><strong id="cleanStat">0</strong><span>Đã làm sạch</span></div>
+          </div>
+        </div>
+      </article>
+
+      <div id="saveRow" class="save-row hidden">
+        <button id="saveBtn" type="button">
+          <svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5V3Zm3 0v6h8V3M8 21v-8h8v8"/></svg>
+          Lưu cài đặt
+        </button>
+      </div>
+
+      <div id="savedToast" class="toast" role="status" aria-live="polite">Đã lưu cài đặt</div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

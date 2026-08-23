@@ -1,0 +1,10 @@
+﻿{
+  "task_id": "e2e-test-streaming-bugfix",
+  "pr_number": 1,
+  "pr_url": "https://github.com/BinLate/AI-Copy-Cleaner/pull/1",
+  "head_sha": "1742d27",
+  "review_round": 1,
+  "status": "FIXING_REVIEW_FINDINGS",
+  "chatgpt_conversation_url": "https://chatgpt.com/c/6a8b46b2-3cb8-83ec-8023-f82cb634c2ae",
+  "latest_findings": "REQUEST_CHANGES"
+}
