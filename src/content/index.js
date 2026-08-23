@@ -12,6 +12,7 @@
   let settings = { ...DEFAULTS };
   let status = null;
   let controls = null;
+  let isApplyingTrim = false;
 
   function normalize(value = {}) {
     const limit = Number.parseInt(value.messageLimit, 10);
@@ -94,54 +95,21 @@
     } catch (_) {}
   }
 
-  function firstTurnId() {
-    const items = document.querySelectorAll('[data-turn-id-container], article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"], [data-message-author-role]');
-    for (const el of items) {
-      const id = el.getAttribute('data-turn-id-container') || el.getAttribute('data-testid') || el.getAttribute('data-message-id');
-      if (id) return id;
-    }
-    return null;
-  }
+  function getDomTurns() {
+    const list = Array.from(document.querySelectorAll(
+      'article[data-testid^="conversation-turn-"], div[data-turn-id-container]'
+    ));
+    if (list.length > 0) return list;
 
-  function saveScrollAnchor() {
-    try {
-      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ url: location.href, conversationId: currentConversationId(), anchor: firstTurnId() }));
-    } catch (_) {}
-  }
-
-  function restoreScrollAnchor() {
-    let saved;
-    try { saved = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null'); } catch (_) { return; }
-    const curId = currentConversationId();
-    if (!saved || !isSameConversation(saved.url, location.href, saved.conversationId, curId) || !saved.anchor) return;
-
-    let tries = 0;
-    const timer = setInterval(() => {
-      tries++;
-      const safe = globalThis.CSS?.escape ? CSS.escape(saved.anchor) : saved.anchor.replace(/"/g, '\\"');
-      const el = document.querySelector(`[data-turn-id-container="${safe}"]`) ||
-                 document.querySelector(`[data-testid="${safe}"]`) ||
-                 document.querySelector(`[data-message-id="${safe}"]`);
-      if (el) {
-        clearInterval(timer);
-        try { sessionStorage.removeItem(SCROLL_KEY); } catch (_) {}
-        requestAnimationFrame(() => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
-      } else if (tries > 30) {
-        clearInterval(timer);
-      }
-    }, 150);
-  }
-
-  function reloadWithExtra(nextExtra) {
-    saveScrollAnchor();
-    setExtra(nextExtra);
-    try { sessionStorage.setItem('aicc_fixlag_navigating', '1'); } catch (_) {}
-    location.reload();
+    const byRole = Array.from(document.querySelectorAll('[data-message-author-role]')).map((el) => {
+      return el.closest('article') || el.closest('[data-testid^="conversation-turn-"]') || el;
+    });
+    return Array.from(new Set(byRole));
   }
 
   function findMessagesContainer() {
     const turn = document.querySelector(
-      'div[data-turn-id-container], article[data-testid^="conversation-turn-"], div[data-testid^="conversation-turn-"], [data-message-author-role]'
+      'article[data-testid^="conversation-turn-"], div[data-turn-id-container], [data-message-author-role]'
     );
     if (turn?.parentElement) return turn.parentElement;
     const main = document.querySelector('main');
@@ -223,61 +191,101 @@
     document.querySelectorAll(`[${NAV_ATTR}]`).forEach((el) => el.remove());
   }
 
-  function ensureControls(retry = 0) {
-    const extra = getExtra();
-    if (!settings.enabled || !status || (!status.hasOlderMessages && extra <= 0)) {
-      removeControls();
-      return;
+  function applyDomTrim() {
+    if (isApplyingTrim) return;
+    isApplyingTrim = true;
+    try {
+      const turns = getDomTurns();
+      const extra = getExtra();
+
+      if (!settings.enabled) {
+        turns.forEach((turn) => {
+          turn.style.removeProperty('display');
+          turn.removeAttribute('data-aicc-hidden');
+        });
+        removeControls();
+        return;
+      }
+
+      const totalTurns = turns.length;
+      if (totalTurns === 0) {
+        removeControls();
+        return;
+      }
+
+      // Each QA pair consists of up to 2 turns (user + assistant)
+      const effectivePairs = settings.messageLimit + extra;
+      const turnsToKeep = Math.max(1, effectivePairs * 2);
+      const hiddenCount = Math.max(0, totalTurns - turnsToKeep);
+      const hiddenPairs = Math.ceil(hiddenCount / 2);
+
+      for (let i = 0; i < totalTurns; i++) {
+        if (i < hiddenCount) {
+          turns[i].style.setProperty('display', 'none', 'important');
+          turns[i].setAttribute('data-aicc-hidden', 'true');
+        } else {
+          turns[i].style.removeProperty('display');
+          turns[i].removeAttribute('data-aicc-hidden');
+        }
+      }
+
+      if (hiddenCount <= 0 && extra <= 0 && (!status || !status.hasOlderMessages)) {
+        removeControls();
+        return;
+      }
+
+      const container = findMessagesContainer();
+      if (!container) return;
+
+      if (controls?.isConnected && controls.parentElement === container) {
+        controls.remove();
+        controls = null;
+      }
+      document.querySelectorAll(`[${NAV_ATTR}]`).forEach((el) => el.remove());
+
+      const wrapper = document.createElement('div');
+      wrapper.setAttribute(NAV_ATTR, 'top');
+      wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:7px;padding:12px 0 4px;margin-bottom:10px;width:100%;box-sizing:border-box;';
+
+      const hasOlder = hiddenCount > 0 || (status && status.hasOlderMessages);
+      const loadStepPairs = Math.min(settings.loadStep, hiddenPairs || settings.loadStep);
+
+      if (hasOlder) {
+        wrapper.appendChild(makeActionCard({
+          title: `Tải ${loadStepPairs} lượt hỏi–đáp trước đó`,
+          subtitle: `Mỗi lượt gồm câu hỏi của bạn + câu trả lời của ChatGPT.`,
+          meta: hiddenPairs > 0 ? `Còn ${hiddenPairs} lượt cũ đang được ẩn để giảm lag.` : 'Bấm để nạp thêm các lượt trò chuyện cũ.',
+          badge: hiddenPairs,
+          direction: 'up',
+          onClick: () => {
+            const nextExtra = extra + settings.loadStep;
+            setExtra(nextExtra);
+            applyDomTrim();
+          }
+        }));
+      }
+
+      if (extra > 0) {
+        wrapper.appendChild(makeActionCard({
+          title: `Thu gọn về ${settings.messageLimit} lượt hỏi–đáp mới nhất`,
+          subtitle: `Ẩn lại ${extra} lượt hỏi–đáp đã tải thêm để giảm lag.`,
+          meta: '',
+          badge: 0,
+          direction: 'down',
+          compact: true,
+          onClick: () => {
+            setExtra(0);
+            applyDomTrim();
+          }
+        }));
+      }
+
+      const firstVisibleTurn = turns.find((t) => !t.hasAttribute('data-aicc-hidden'));
+      container.insertBefore(wrapper, firstVisibleTurn || container.firstChild);
+      controls = wrapper;
+    } finally {
+      isApplyingTrim = false;
     }
-
-    const container = findMessagesContainer();
-    if (!container) {
-      if (retry < 20) setTimeout(() => ensureControls(retry + 1), 300);
-      return;
-    }
-
-    if (controls?.isConnected && controls.parentElement === container) {
-      controls.remove();
-      controls = null;
-    }
-    document.querySelectorAll(`[${NAV_ATTR}]`).forEach((el) => el.remove());
-
-    const wrapper = document.createElement('div');
-    wrapper.setAttribute(NAV_ATTR, 'top');
-    wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:7px;padding:12px 0 4px;margin-bottom:10px;width:100%;box-sizing:border-box;';
-
-    const totalTurns = status.totalTurns ?? status.totalMessages ?? 0;
-    const renderedTurns = status.renderedTurns ?? status.renderedMessages ?? 0;
-    const hiddenCount = Math.max(0, totalTurns - renderedTurns);
-
-    if (status.hasOlderMessages) {
-      wrapper.appendChild(makeActionCard({
-        title: `Tải ${Math.min(settings.loadStep, hiddenCount || settings.loadStep)} lượt hỏi–đáp trước đó`,
-        subtitle: `Mỗi lượt gồm câu hỏi của bạn + câu trả lời của ChatGPT.`,
-        meta: hiddenCount > 0 ? `Còn ${hiddenCount} lượt cũ đang được ẩn.` : 'Có thể đổi số lượng trong cài đặt extension.',
-        badge: hiddenCount,
-        direction: 'up',
-        onClick: () => reloadWithExtra(extra + settings.loadStep)
-      }));
-    }
-
-    if (extra > 0) {
-      wrapper.appendChild(makeActionCard({
-        title: `Thu gọn về ${settings.messageLimit} lượt hỏi–đáp mới nhất`,
-        subtitle: `Ẩn lại ${extra} lượt hỏi–đáp đã tải thêm để giảm lag.`,
-        meta: '',
-        badge: 0,
-        direction: 'down',
-        compact: true,
-        onClick: () => reloadWithExtra(0)
-      }));
-    }
-
-    const firstTurn = container.querySelector(
-      ':scope > [data-turn-id-container], :scope > [data-testid^="conversation-turn-"], :scope > article, :scope > [data-message-author-role]'
-    );
-    container.insertBefore(wrapper, firstTurn || container.firstChild);
-    controls = wrapper;
   }
 
   function acceptStatus(payload) {
@@ -288,8 +296,7 @@
                     (!curId && payload.conversationId);
     if (!matches) return;
     status = payload;
-    ensureControls();
-    restoreScrollAnchor();
+    applyDomTrim();
   }
 
   window.addEventListener('message', (event) => {
@@ -309,13 +316,14 @@
       );
       if (cached) acceptStatus(cached);
     } catch (_) {}
+    applyDomTrim();
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes[OPT_KEY]) return;
     settings = normalize(changes[OPT_KEY].newValue);
     syncConfig();
-    ensureControls();
+    applyDomTrim();
   });
 
   let lastUrl = location.href;
@@ -351,18 +359,21 @@
         } catch (_) {}
       }
     }
-    if (status && !controls?.isConnected) ensureControls();
+    applyDomTrim();
   }
 
-  setInterval(checkRouteChange, 600);
+  setInterval(checkRouteChange, 500);
 
-  // MutationObserver to attach controls as soon as the DOM renders
+  // MutationObserver to apply DOM trimming as soon as conversation turns render or change
   if (typeof MutationObserver !== 'undefined') {
+    let debounceTimer = 0;
     const observer = new MutationObserver(() => {
-      if (status && !controls?.isConnected) {
-        ensureControls();
-      }
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        applyDomTrim();
+      }, 100);
     });
+
     if (document.body) {
       observer.observe(document.body, { childList: true, subtree: true });
     } else {
