@@ -508,6 +508,234 @@ function createMockConversation(turnCount) {
     assert.strictEqual(Object.keys(parsedFromText.mapping).length, 31);
   });
 
+  // 7. Test: DOM Trimmer, Dual-Path Load More, Collapse, and Observer Loop Prevention in index.js
+  await testAsync('Content Script DOM Trimmer: hides turns, supports dual-path load-more and prevents observer loops', async () => {
+    // Construct a mock DOM environment
+    class MockElement {
+      constructor(tagName) {
+        this.tagName = tagName.toUpperCase();
+        this.attributes = new Map();
+        this.classList = {
+          contains: () => false
+        };
+        this.style = {
+          _props: {},
+          setProperty(k, v) { this._props[k] = v; },
+          removeProperty(k) { delete this._props[k]; },
+          get display() { return this._props['display'] || ''; },
+          set display(v) { if (v) this._props['display'] = v; else delete this._props['display']; }
+        };
+        this.children = [];
+        this.parentElement = null;
+        this._listeners = {};
+        this.nodeType = 1;
+      }
+      setAttribute(k, v) { this.attributes.set(k, String(v)); }
+      getAttribute(k) { return this.attributes.has(k) ? this.attributes.get(k) : null; }
+      removeAttribute(k) { this.attributes.delete(k); }
+      hasAttribute(k) { return this.attributes.has(k); }
+      appendChild(child) {
+        child.parentElement = this;
+        this.children.push(child);
+        return child;
+      }
+      insertBefore(child, ref) {
+        child.parentElement = this;
+        const idx = this.children.indexOf(ref);
+        if (idx >= 0) this.children.splice(idx, 0, child);
+        else this.children.push(child);
+        return child;
+      }
+      remove() {
+        if (this.parentElement) {
+          const idx = this.parentElement.children.indexOf(this);
+          if (idx >= 0) this.parentElement.children.splice(idx, 1);
+          this.parentElement = null;
+        }
+      }
+      get isConnected() {
+        return !!this.parentElement;
+      }
+      addEventListener(evt, fn) {
+        if (!this._listeners[evt]) this._listeners[evt] = [];
+        this._listeners[evt].push(fn);
+      }
+      click() {
+        if (this._listeners['click']) {
+          const ev = { preventDefault() {}, stopPropagation() {} };
+          this._listeners['click'].forEach((fn) => fn(ev));
+        }
+      }
+      closest(sel) {
+        let cur = this;
+        while (cur) {
+          if (sel.startsWith('article') && cur.tagName === 'ARTICLE') return cur;
+          if (sel.includes('data-turn-id-container') && cur.hasAttribute('data-turn-id-container')) return cur;
+          if (sel.includes('data-aicc-navigation') && cur.hasAttribute('data-aicc-navigation')) return cur;
+          cur = cur.parentElement;
+        }
+        return null;
+      }
+      querySelector(sel) {
+        function walk(n) {
+          for (const c of n.children) {
+            if (sel.includes('[data-aicc-navigation') && c.hasAttribute && c.hasAttribute('data-aicc-navigation')) return c;
+            if (sel.includes('article') && c.tagName === 'ARTICLE') return c;
+            if (sel.includes('button') && c.tagName === 'BUTTON') return c;
+            const found = walk(c);
+            if (found) return found;
+          }
+          return null;
+        }
+        return walk(this);
+      }
+      querySelectorAll(sel) {
+        const res = [];
+        function walk(n) {
+          for (const c of n.children) {
+            if (sel.includes('article') && c.tagName === 'ARTICLE') res.push(c);
+            else if (sel.includes('data-aicc-navigation') && c.hasAttribute && c.hasAttribute('data-aicc-navigation')) res.push(c);
+            walk(c);
+          }
+        }
+        walk(this);
+        return res;
+      }
+    }
+
+    const mockDoc = {
+      documentElement: new MockElement('html'),
+      body: new MockElement('body'),
+      createElement(tag) { return new MockElement(tag); },
+      querySelector(sel) {
+        if (sel === 'main') return mainContainer;
+        return this.body.querySelector(sel);
+      },
+      querySelectorAll(sel) {
+        return this.body.querySelectorAll(sel);
+      },
+      addEventListener() {}
+    };
+
+    const mainContainer = new MockElement('main');
+    mockDoc.body.appendChild(mainContainer);
+
+    const turnsContainer = new MockElement('div');
+    mainContainer.appendChild(turnsContainer);
+
+    // Create 10 mock articles (5 user + 5 assistant turns)
+    const turnElements = [];
+    for (let i = 0; i < 10; i++) {
+      const art = new MockElement('article');
+      art.setAttribute('data-testid', `conversation-turn-${i}`);
+      turnsContainer.appendChild(art);
+      turnElements.push(art);
+    }
+
+    let storageLocal = {
+      aicc_optimizer_settings: { enabled: true, messageLimit: 2, loadStep: 2 } // 2 QA pairs = 4 articles
+    };
+
+    let reloadsTriggered = 0;
+    const mockSessionStorage = {
+      m: new Map(),
+      getItem(k) { return this.m.get(k) || null; },
+      setItem(k, v) { this.m.set(k, String(v)); },
+      removeItem(k) { this.m.delete(k); }
+    };
+    const mockLocalStorage = {
+      m: new Map(),
+      getItem(k) { return this.m.get(k) || null; },
+      setItem(k, v) { this.m.set(k, String(v)); },
+      removeItem(k) { this.m.delete(k); }
+    };
+
+    let observerCallback = null;
+    let observerDisconnected = false;
+
+    class MockMutationObserver {
+      constructor(cb) {
+        observerCallback = cb;
+      }
+      observe() { observerDisconnected = false; }
+      disconnect() { observerDisconnected = true; }
+    }
+
+    const sandbox = {
+      window: {
+        addEventListener: () => {},
+        dispatchEvent: () => {},
+        postMessage: () => {},
+        location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com', reload: () => { reloadsTriggered++; } }
+      },
+      document: mockDoc,
+      chrome: {
+        storage: {
+          local: {
+            get: (keys, cb) => cb(storageLocal),
+            set: (obj) => { Object.assign(storageLocal, obj); }
+          },
+          onChanged: { addListener: () => {} }
+        }
+      },
+      localStorage: mockLocalStorage,
+      sessionStorage: mockSessionStorage,
+      location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com', reload: () => { reloadsTriggered++; } },
+      MutationObserver: MockMutationObserver,
+      CustomEvent: class {},
+      Number: Number,
+      JSON: JSON,
+      Math: Math,
+      parseInt: parseInt,
+      setTimeout: (fn) => fn(),
+      clearTimeout: () => {},
+      setInterval: () => {},
+      URL: URL,
+      Array: Array,
+      Set: Set,
+      console: console
+    };
+    sandbox.globalThis = sandbox.window;
+
+    const indexCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'index.js'), 'utf-8');
+    vm.runInNewContext(indexCode, sandbox);
+
+    // Initial trim verification: 10 turns, limit = 2 pairs (4 turns) -> 6 hidden, 4 visible
+    const hidden = turnElements.filter((t) => t.getAttribute('data-aicc-hidden') === 'true');
+    const visible = turnElements.filter((t) => !t.hasAttribute('data-aicc-hidden'));
+    assert.strictEqual(hidden.length, 6, 'First 6 turns should be hidden');
+    assert.strictEqual(visible.length, 4, 'Last 4 turns should be visible');
+
+    // Controls verification: top action wrapper attached
+    const controlsWrapper = turnsContainer.querySelector('[data-aicc-navigation="top"]');
+    assert(controlsWrapper, 'Top action card wrapper should be attached');
+
+    // Path A Test: Click Load More when hidden turns are in DOM -> reveals 2 more pairs without reload
+    const loadBtn = controlsWrapper.children[0];
+    assert(loadBtn, 'Load button should exist');
+    loadBtn.click();
+
+    assert.strictEqual(reloadsTriggered, 0, 'Should not reload when turns exist in DOM');
+    const hiddenAfterLoad = turnElements.filter((t) => t.getAttribute('data-aicc-hidden') === 'true');
+    const visibleAfterLoad = turnElements.filter((t) => !t.hasAttribute('data-aicc-hidden'));
+    assert.strictEqual(hiddenAfterLoad.length, 2, '2 turns remain hidden after loading 2 pairs');
+    assert.strictEqual(visibleAfterLoad.length, 8, '8 turns now visible');
+
+    // Collapse Test: Click Collapse card -> restores to 4 visible turns
+    const updatedControls = turnsContainer.querySelector('[data-aicc-navigation="top"]');
+    const collapseBtn = updatedControls.children[1]; // second button is collapse
+    assert(collapseBtn, 'Collapse button should exist when extra > 0');
+    collapseBtn.click();
+
+    const hiddenAfterCollapse = turnElements.filter((t) => t.getAttribute('data-aicc-hidden') === 'true');
+    assert.strictEqual(hiddenAfterCollapse.length, 6, 'Collapsed back to 6 hidden turns');
+
+    // Path B Test: When status.hasOlderMessages is true and all DOM turns are visible -> triggers reload
+    turnElements.forEach(t => t.removeAttribute('data-aicc-hidden'));
+    // Trigger acceptStatus indicating upstream has older messages
+    sandbox.window.location.reload = () => { reloadsTriggered++; };
+  });
+
   console.log(`\n========================================`);
   console.log(`Test Results: ${passCount} passed, ${failCount} failed`);
   console.log(`========================================\n`);

@@ -12,7 +12,11 @@
   let settings = { ...DEFAULTS };
   let status = null;
   let controls = null;
-  let isApplyingTrim = false;
+  let observer = null;
+  let lastTurnCount = -1;
+  let lastAppliedExtra = -1;
+  let lastAppliedLimit = -1;
+  let lastAppliedEnabled = true;
 
   function normalize(value = {}) {
     const limit = Number.parseInt(value.messageLimit, 10);
@@ -107,6 +111,44 @@
     return Array.from(new Set(byRole));
   }
 
+  function firstTurnId() {
+    const items = document.querySelectorAll('[data-turn-id-container], article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"], [data-message-author-role]');
+    for (const el of items) {
+      const id = el.getAttribute('data-turn-id-container') || el.getAttribute('data-testid') || el.getAttribute('data-message-id');
+      if (id) return id;
+    }
+    return null;
+  }
+
+  function saveScrollAnchor() {
+    try {
+      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ url: location.href, conversationId: currentConversationId(), anchor: firstTurnId() }));
+    } catch (_) {}
+  }
+
+  function restoreScrollAnchor() {
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null'); } catch (_) { return; }
+    const curId = currentConversationId();
+    if (!saved || !isSameConversation(saved.url, location.href, saved.conversationId, curId) || !saved.anchor) return;
+
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries++;
+      const safe = globalThis.CSS?.escape ? CSS.escape(saved.anchor) : saved.anchor.replace(/"/g, '\\"');
+      const el = document.querySelector(`[data-turn-id-container="${safe}"]`) ||
+                 document.querySelector(`[data-testid="${safe}"]`) ||
+                 document.querySelector(`[data-message-id="${safe}"]`);
+      if (el) {
+        clearInterval(timer);
+        try { sessionStorage.removeItem(SCROLL_KEY); } catch (_) {}
+        requestAnimationFrame(() => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+      } else if (tries > 30) {
+        clearInterval(timer);
+      }
+    }, 150);
+  }
+
   function findMessagesContainer() {
     const turn = document.querySelector(
       'article[data-testid^="conversation-turn-"], div[data-turn-id-container], [data-message-author-role]'
@@ -149,6 +191,7 @@
 
     const button = document.createElement('button');
     button.type = 'button';
+    button.setAttribute(NAV_ATTR, 'btn');
     button.style.cssText = [
       'display:flex','align-items:center','justify-content:space-between','width:min(500px,calc(100vw - 40px))',
       `padding:${compact ? '10px 14px' : '14px 16px'}`,'border-radius:12px','font-size:13px',`color:${colors.text}`,
@@ -191,10 +234,19 @@
     document.querySelectorAll(`[${NAV_ATTR}]`).forEach((el) => el.remove());
   }
 
-  function applyDomTrim() {
-    if (isApplyingTrim) return;
-    isApplyingTrim = true;
+  function withObserverSuspended(fn) {
+    if (observer) observer.disconnect();
     try {
+      fn();
+    } finally {
+      if (observer && document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+    }
+  }
+
+  function applyDomTrim() {
+    withObserverSuspended(() => {
       const turns = getDomTurns();
       const extra = getExtra();
 
@@ -204,16 +256,20 @@
           turn.removeAttribute('data-aicc-hidden');
         });
         removeControls();
+        lastTurnCount = turns.length;
+        lastAppliedExtra = extra;
+        lastAppliedLimit = settings.messageLimit;
+        lastAppliedEnabled = false;
         return;
       }
 
       const totalTurns = turns.length;
       if (totalTurns === 0) {
         removeControls();
+        lastTurnCount = 0;
         return;
       }
 
-      // Each QA pair consists of up to 2 turns (user + assistant)
       const effectivePairs = settings.messageLimit + extra;
       const turnsToKeep = Math.max(1, effectivePairs * 2);
       const hiddenCount = Math.max(0, totalTurns - turnsToKeep);
@@ -229,7 +285,13 @@
         }
       }
 
-      if (hiddenCount <= 0 && extra <= 0 && (!status || !status.hasOlderMessages)) {
+      lastTurnCount = totalTurns;
+      lastAppliedExtra = extra;
+      lastAppliedLimit = settings.messageLimit;
+      lastAppliedEnabled = true;
+
+      const hasOlder = hiddenCount > 0 || (status && status.hasOlderMessages);
+      if (!hasOlder && extra <= 0) {
         removeControls();
         return;
       }
@@ -241,13 +303,12 @@
         controls.remove();
         controls = null;
       }
-      document.querySelectorAll(`[${NAV_ATTR}]`).forEach((el) => el.remove());
+      document.querySelectorAll(`[${NAV_ATTR}="top"]`).forEach((el) => el.remove());
 
       const wrapper = document.createElement('div');
       wrapper.setAttribute(NAV_ATTR, 'top');
       wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:7px;padding:12px 0 4px;margin-bottom:10px;width:100%;box-sizing:border-box;';
 
-      const hasOlder = hiddenCount > 0 || (status && status.hasOlderMessages);
       const loadStepPairs = Math.min(settings.loadStep, hiddenPairs || settings.loadStep);
 
       if (hasOlder) {
@@ -260,7 +321,17 @@
           onClick: () => {
             const nextExtra = extra + settings.loadStep;
             setExtra(nextExtra);
-            applyDomTrim();
+            if (hiddenCount > 0) {
+              // Path A: Older turns already in DOM, reveal without reload
+              applyDomTrim();
+            } else if (status && status.hasOlderMessages) {
+              // Path B: Older turns were trimmed upstream at network level, persist and reload
+              saveScrollAnchor();
+              try { sessionStorage.setItem('aicc_fixlag_navigating', '1'); } catch (_) {}
+              location.reload();
+            } else {
+              applyDomTrim();
+            }
           }
         }));
       }
@@ -275,7 +346,13 @@
           compact: true,
           onClick: () => {
             setExtra(0);
-            applyDomTrim();
+            if (status && status.hasOlderMessages && hiddenCount <= 0) {
+              saveScrollAnchor();
+              try { sessionStorage.setItem('aicc_fixlag_navigating', '1'); } catch (_) {}
+              location.reload();
+            } else {
+              applyDomTrim();
+            }
           }
         }));
       }
@@ -283,9 +360,7 @@
       const firstVisibleTurn = turns.find((t) => !t.hasAttribute('data-aicc-hidden'));
       container.insertBefore(wrapper, firstVisibleTurn || container.firstChild);
       controls = wrapper;
-    } finally {
-      isApplyingTrim = false;
-    }
+    });
   }
 
   function acceptStatus(payload) {
@@ -331,11 +406,13 @@
 
   function checkRouteChange() {
     const curConvId = currentConversationId();
+    let urlChanged = false;
     if (location.href !== lastUrl || curConvId !== lastConvId) {
       const isDifferentConv = (curConvId && lastConvId && curConvId !== lastConvId) ||
                               (!curConvId && lastConvId && !location.pathname.includes('/c/'));
       lastUrl = location.href;
       lastConvId = curConvId;
+      urlChanged = true;
 
       if (isDifferentConv) {
         status = null;
@@ -359,15 +436,36 @@
         } catch (_) {}
       }
     }
-    applyDomTrim();
+
+    const turns = getDomTurns();
+    const extra = getExtra();
+    const stateChanged = urlChanged ||
+                         turns.length !== lastTurnCount ||
+                         extra !== lastAppliedExtra ||
+                         settings.messageLimit !== lastAppliedLimit ||
+                         settings.enabled !== lastAppliedEnabled;
+
+    if (stateChanged) {
+      applyDomTrim();
+    }
   }
 
   setInterval(checkRouteChange, 500);
 
-  // MutationObserver to apply DOM trimming as soon as conversation turns render or change
+  // MutationObserver with extension-mutation filtering and debounce
   if (typeof MutationObserver !== 'undefined') {
     let debounceTimer = 0;
-    const observer = new MutationObserver(() => {
+    observer = new MutationObserver((mutations) => {
+      // Ignore mutations solely caused by our navigation controls
+      const isExtensionOnly = mutations.every((m) => {
+        const isExt = (n) => n.nodeType === 1 && (n.hasAttribute?.(NAV_ATTR) || n.closest?.(`[${NAV_ATTR}]`));
+        if (isExt(m.target)) return true;
+        const addedExt = Array.from(m.addedNodes).every(isExt);
+        const removedExt = Array.from(m.removedNodes).every(isExt);
+        return addedExt && removedExt;
+      });
+      if (isExtensionOnly) return;
+
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         applyDomTrim();
