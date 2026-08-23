@@ -3,27 +3,24 @@
   'use strict';
   let enabled = true;
 
-  function syncState(val) {
+  function updateEnabled(val) {
     enabled = val !== false;
-    try {
-      window.postMessage({ type: 'aicc-sync-clean-state', enabled }, '*');
-    } catch (_) {}
   }
 
   try {
     chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items) {
-        syncState(items.autoCleanEnabled);
+        updateEnabled(items.autoCleanEnabled);
       }
     });
     chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined) {
-        syncState(items.autoCleanEnabled);
+        updateEnabled(items.autoCleanEnabled);
       }
     });
     chrome.storage.onChanged.addListener((changes) => {
       if (changes.autoCleanEnabled) {
-        syncState(changes.autoCleanEnabled.newValue);
+        updateEnabled(changes.autoCleanEnabled.newValue);
       }
     });
   } catch (_) {}
