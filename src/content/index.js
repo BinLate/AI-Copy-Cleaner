@@ -32,10 +32,22 @@
     } catch (_) {}
   }
 
+  function sameConversationUrl(url1, url2) {
+    if (!url1 || !url2) return false;
+    if (url1 === url2) return true;
+    try {
+      const p1 = new URL(url1, location.origin).pathname.replace(/\/+$/, '').toLowerCase();
+      const p2 = new URL(url2, location.origin).pathname.replace(/\/+$/, '').toLowerCase();
+      return p1 === p2;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function getExtra() {
     try {
       const value = JSON.parse(localStorage.getItem(EXTRA_KEY) || 'null');
-      return value?.url === location.href ? Math.max(0, parseInt(value.extra, 10) || 0) : 0;
+      return value && sameConversationUrl(value.url, location.href) ? Math.max(0, parseInt(value.extra, 10) || 0) : 0;
     } catch (_) {
       return 0;
     }
@@ -49,7 +61,7 @@
   }
 
   function firstTurnId() {
-    const items = document.querySelectorAll('[data-turn-id-container], [data-testid^="conversation-turn-"]');
+    const items = document.querySelectorAll('[data-turn-id-container], article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]');
     for (const el of items) {
       const id = el.getAttribute('data-turn-id-container') || el.getAttribute('data-testid');
       if (id) return id;
@@ -66,7 +78,7 @@
   function restoreScrollAnchor() {
     let saved;
     try { saved = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null'); } catch (_) { return; }
-    if (!saved || saved.url !== location.href || !saved.anchor) return;
+    if (!saved || !sameConversationUrl(saved.url, location.href) || !saved.anchor) return;
 
     let tries = 0;
     const timer = setInterval(() => {
@@ -91,10 +103,14 @@
   }
 
   function findMessagesContainer() {
-    const turn = document.querySelector('div[data-turn-id-container]');
+    const turn = document.querySelector('div[data-turn-id-container], article[data-testid^="conversation-turn-"], div[data-testid^="conversation-turn-"]');
     if (turn?.parentElement) return turn.parentElement;
-    const fallback = document.querySelector('[data-testid^="conversation-turn-"]');
-    return fallback?.parentElement || null;
+    const main = document.querySelector('main');
+    if (main) {
+      const scrollable = main.querySelector('div[class*="react-scroll-to-bottom"], div[class*="overflow-y-auto"]');
+      if (scrollable) return scrollable;
+    }
+    return null;
   }
 
   function isDark() {
@@ -171,7 +187,7 @@
 
     const container = findMessagesContainer();
     if (!container) {
-      if (retry < 10) setTimeout(() => ensureControls(retry + 1), 500);
+      if (retry < 20) setTimeout(() => ensureControls(retry + 1), 300);
       return;
     }
 
@@ -212,13 +228,13 @@
       }));
     }
 
-    const firstTurn = container.querySelector(':scope > [data-turn-id-container], :scope > [data-testid^="conversation-turn-"]');
+    const firstTurn = container.querySelector(':scope > [data-turn-id-container], :scope > [data-testid^="conversation-turn-"], :scope > article');
     container.insertBefore(wrapper, firstTurn || container.firstChild);
     controls = wrapper;
   }
 
   function acceptStatus(payload) {
-    if (!payload || payload.url !== location.href) return;
+    if (!payload || !sameConversationUrl(payload.url, location.href)) return;
     status = payload;
     ensureControls();
     restoreScrollAnchor();
@@ -253,9 +269,25 @@
       removeControls();
       try {
         const extra = JSON.parse(localStorage.getItem(EXTRA_KEY) || 'null');
-        if (extra?.url !== location.href) localStorage.removeItem(EXTRA_KEY);
+        if (extra && !sameConversationUrl(extra.url, location.href)) localStorage.removeItem(EXTRA_KEY);
       } catch (_) {}
     }
     if (status && !controls?.isConnected) ensureControls();
-  }, 1200);
+  }, 1000);
+
+  // MutationObserver to attach controls as soon as the DOM renders
+  if (typeof MutationObserver !== 'undefined') {
+    const observer = new MutationObserver(() => {
+      if (status && !controls?.isConnected) {
+        ensureControls();
+      }
+    });
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', () => {
+        if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+      });
+    }
+  }
 })();

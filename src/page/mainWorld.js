@@ -10,8 +10,7 @@
   const NAV_KEY = 'aicc_fixlag_navigating';
   const DEFAULT_CONFIG = { enabled: true, messageLimit: 15 };
   const HIDDEN_ROLES = new Set(['system', 'tool', 'thinking']);
-  const TREE_PATH = /^\/backend-api\/(conversation|shared_conversation)\/[^/]+\/?$/;
-  const PAGE_CONV = /^\/c\/([^/]+)/;
+  const PAGE_CONV = /(?:\/c\/|\/g\/[^/]+\/c\/)([^/?#]+)/i;
   const nativeJSONParse = JSON.parse.bind(JSON);
   const nativeFetch = window.fetch.bind(window);
 
@@ -71,7 +70,11 @@
   function getExtra() {
     try {
       const value = nativeJSONParse(localStorage.getItem(EXTRA_KEY) || 'null');
-      if (value && value.url === location.href) return Math.max(0, parseInt(value.extra, 10) || 0);
+      if (value) {
+        const curPath = location.pathname.replace(/\/+$/, '').toLowerCase();
+        const valPath = new URL(value.url || '', location.origin).pathname.replace(/\/+$/, '').toLowerCase();
+        if (curPath === valPath) return Math.max(0, parseInt(value.extra, 10) || 0);
+      }
     } catch (_) {}
     return 0;
   }
@@ -98,15 +101,17 @@
     return { urlString, method, pathname };
   }
 
-  function isTreePath(pathname) {
-    if (!pathname || pathname.includes('/conversations')) return false;
-    if (/\/f\/conversation\//i.test(pathname)) return false;
-    if (/\/conversation\/[^/]+\/.+/i.test(pathname)) return false;
-    return TREE_PATH.test(pathname);
+  function isPotentialConversationPath(pathname) {
+    if (!pathname || typeof pathname !== 'string') return false;
+    const lower = pathname.toLowerCase();
+    if (/\.(?:js|css|png|jpe?g|svg|woff2?|wasm|ico|json|map)(?:\?|$)/i.test(lower)) return false;
+    if (lower.includes('/conversations')) return false;
+    if (lower.includes('/conversation_limit') || lower.includes('/stream_status') || lower.includes('/textdocs')) return false;
+    return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|shared_conversation)\/[^/]+/i.test(lower);
   }
 
   function isTreeGet(method, pathname) {
-    return method === 'GET' && isTreePath(pathname);
+    return (method === 'GET' || !method) && isPotentialConversationPath(pathname);
   }
 
   function pageConversationId() {
@@ -468,6 +473,47 @@
     await ensureConfigReady();
     const response = await nativeFetch(...args);
     return processConversationResponse(response);
+  }
+
+  // Intercept XMLHttpRequest for complete coverage
+  const OriginalXHR = window.XMLHttpRequest;
+  if (OriginalXHR && typeof OriginalXHR.prototype.open === 'function') {
+    const origOpen = OriginalXHR.prototype.open;
+    const origSend = OriginalXHR.prototype.send;
+
+    OriginalXHR.prototype.open = function (method, url, ...rest) {
+      this.__aicc_method = String(method || 'GET').toUpperCase();
+      this.__aicc_url = url;
+      return origOpen.call(this, method, url, ...rest);
+    };
+
+    OriginalXHR.prototype.send = function (body) {
+      const { method, pathname } = requestParts(this.__aicc_url, { method: this.__aicc_method });
+      if (!isTreeGet(method, pathname)) {
+        return origSend.call(this, body);
+      }
+
+      const onReady = () => {
+        if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
+          try {
+            const rawText = this.responseText;
+            if (rawText) {
+              const data = nativeJSONParse(rawText);
+              if (looksLikeConversationData(data)) {
+                const trimmed = applyTrimToData(data, 'xhr');
+                if (trimmed !== data) {
+                  const trimmedText = JSON.stringify(trimmed);
+                  Object.defineProperty(this, 'responseText', { value: trimmedText, configurable: true });
+                  Object.defineProperty(this, 'response', { value: trimmedText, configurable: true });
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      };
+      this.addEventListener('readystatechange', onReady);
+      return origSend.call(this, body);
+    };
   }
 
   async function initWasm() {
