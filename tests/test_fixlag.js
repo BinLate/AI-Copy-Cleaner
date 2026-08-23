@@ -661,11 +661,23 @@ function createMockConversation(turnCount) {
       disconnect() { observerDisconnected = true; }
     }
 
+    const windowListeners = {};
+    let storageChangeListeners = [];
     const sandbox = {
       window: {
-        addEventListener: () => {},
-        dispatchEvent: () => {},
-        postMessage: () => {},
+        addEventListener: (evt, fn) => {
+          if (!windowListeners[evt]) windowListeners[evt] = [];
+          windowListeners[evt].push(fn);
+        },
+        dispatchEvent: (e) => {
+          if (windowListeners[e.type]) windowListeners[e.type].forEach((fn) => fn(e));
+        },
+        postMessage: (msg) => {
+          if (windowListeners['message']) {
+            const ev = { source: sandbox.window, data: msg };
+            windowListeners['message'].forEach((fn) => fn(ev));
+          }
+        },
         location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com', reload: () => { reloadsTriggered++; } }
       },
       document: mockDoc,
@@ -675,7 +687,9 @@ function createMockConversation(turnCount) {
             get: (keys, cb) => cb(storageLocal),
             set: (obj) => { Object.assign(storageLocal, obj); }
           },
-          onChanged: { addListener: () => {} }
+          onChanged: {
+            addListener: (fn) => storageChangeListeners.push(fn)
+          }
         }
       },
       localStorage: mockLocalStorage,
@@ -731,9 +745,58 @@ function createMockConversation(turnCount) {
     assert.strictEqual(hiddenAfterCollapse.length, 6, 'Collapsed back to 6 hidden turns');
 
     // Path B Test: When status.hasOlderMessages is true and all DOM turns are visible -> triggers reload
-    turnElements.forEach(t => t.removeAttribute('data-aicc-hidden'));
-    // Trigger acceptStatus indicating upstream has older messages
-    sandbox.window.location.reload = () => { reloadsTriggered++; };
+    // Update settings so messageLimit is 5 (10 turns visible, hiddenCount === 0)
+    storageLocal.aicc_optimizer_settings.messageLimit = 5;
+    storageChangeListeners.forEach((fn) => fn({
+      aicc_optimizer_settings: {
+        newValue: { enabled: true, messageLimit: 5, loadStep: 2 }
+      }
+    }, 'local'));
+
+    // Dispatch status message indicating upstream has older messages
+    sandbox.window.postMessage({
+      type: 'aicc-fixlag-status',
+      payload: {
+        hasOlderMessages: true,
+        totalTurns: 30,
+        renderedTurns: 5,
+        totalVisibleMessages: 60,
+        renderedVisibleMessages: 10,
+        conversationId: 'test-uuid-1234',
+        url: 'https://chatgpt.com/c/test-uuid-1234'
+      }
+    });
+
+    const pathBControls = turnsContainer.querySelector('[data-aicc-navigation="top"]');
+    assert(pathBControls, 'Top action card wrapper should be attached for upstream hasOlderMessages');
+
+    const pathBLoadBtn = pathBControls.children[0];
+    assert(pathBLoadBtn, 'Path B Load button should exist');
+    reloadsTriggered = 0;
+    pathBLoadBtn.click();
+
+    assert.strictEqual(reloadsTriggered, 1, 'Path B should trigger location.reload() exactly once');
+    const savedExtra = JSON.parse(mockLocalStorage.getItem('aicc_fixlag_extra') || '{}');
+    assert.strictEqual(savedExtra.extra, 2, 'Extra should increase by loadStep (2)');
+    assert(mockSessionStorage.getItem('aicc_fixlag_scroll_restore'), 'Scroll anchor should be saved');
+    assert.strictEqual(mockSessionStorage.getItem('aicc_fixlag_navigating'), '1', 'Navigating flag should be set');
+  });
+
+  // 8. Test: Upstream 30 QA pairs -> initially trimmed to 15 -> post-reload with extra=5 trimmed to 20
+  test('Upstream integration: 30 QA pairs initially trimmed to 15, and after load-more with extra=5 trimmed to 20', () => {
+    const upstreamData = createMockConversation(30);
+
+    // Initial load: limit = 15, extra = 0
+    const initialResult = trimConversation(upstreamData, 15, 0);
+    assert.strictEqual(initialResult.renderedTurns, 15, 'Initially renders 15 turns');
+    assert.strictEqual(initialResult.totalTurns, 30, 'Total turns is 30');
+    assert.strictEqual(initialResult.hasOlderMessages, true, 'hasOlderMessages is true');
+
+    // Post-reload: limit = 15, extra = 5
+    const postReloadResult = trimConversation(upstreamData, 15, 5);
+    assert.strictEqual(postReloadResult.renderedTurns, 20, 'Post-reload renders 20 turns (15 + 5)');
+    assert.strictEqual(postReloadResult.totalTurns, 30, 'Total turns remains 30');
+    assert.strictEqual(postReloadResult.hasOlderMessages, true, 'Still has 10 older messages');
   });
 
   console.log(`\n========================================`);

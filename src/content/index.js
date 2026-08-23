@@ -142,9 +142,14 @@
       if (el) {
         clearInterval(timer);
         try { sessionStorage.removeItem(SCROLL_KEY); } catch (_) {}
-        requestAnimationFrame(() => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+        if (typeof requestAnimationFrame !== 'undefined') {
+          requestAnimationFrame(() => el.scrollIntoView?.({ block: 'start', behavior: 'instant' }));
+        } else {
+          el.scrollIntoView?.({ block: 'start', behavior: 'instant' });
+        }
       } else if (tries > 30) {
         clearInterval(timer);
+        try { sessionStorage.removeItem(SCROLL_KEY); } catch (_) {}
       }
     }, 150);
   }
@@ -372,6 +377,7 @@
     if (!matches) return;
     status = payload;
     applyDomTrim();
+    restoreScrollAnchor();
   }
 
   window.addEventListener('message', (event) => {
@@ -392,6 +398,7 @@
       if (cached) acceptStatus(cached);
     } catch (_) {}
     applyDomTrim();
+    restoreScrollAnchor();
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
