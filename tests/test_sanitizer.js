@@ -7,6 +7,19 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+// Mock DataTransfer for Node environment
+global.DataTransfer = class DataTransfer {
+  constructor() {
+    this.data = {};
+  }
+  setData(format, data) {
+    this.data[format] = data;
+  }
+  getData(format) {
+    return this.data[format];
+  }
+};
+
 // Load sanitizer module
 const sanitizerPath = path.join(__dirname, '..', 'src', 'utils', 'sanitizer.js');
 const { cleanAIHtml, isSafeUrl, decodeHtmlEntities } = require(sanitizerPath);
@@ -212,10 +225,12 @@ it('Validates inject.js cannot be bypassed or disabled by hostile page scripts e
     globalThis: {},
     console: console,
     cleanAIHtml: cleanAIHtml,
+    DataTransfer: function() {},
     Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts?.type; } text() { return Promise.resolve(this.parts.join('')); } },
     ClipboardItem: class { constructor(types) { this.types = types; } }
   };
   sandbox.window.DataTransfer.prototype = mockDataTransfer;
+  sandbox.DataTransfer.prototype = mockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
   // Run sanitizer and inject in sandbox

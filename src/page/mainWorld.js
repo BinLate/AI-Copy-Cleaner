@@ -132,7 +132,8 @@
   }
 
   function nodeRole(node) {
-    return String(node?.message?.author?.role || '').toLowerCase();
+    const role = node?.message?.author?.role || node?.message?.role || node?.role || '';
+    return String(role).toLowerCase();
   }
 
   function isVisibleMessage(node) {
@@ -452,6 +453,7 @@
 
   async function interceptedFetch(...args) {
     const { method, pathname } = requestParts(args[0], args[1]);
+    window.__AICC_TRIM_LAST_URL_SEEN__ = pathname;
     if (!isTreeGet(method, pathname)) {
       return nativeFetch(...args);
     }
@@ -509,6 +511,7 @@
   window.fetch = function (...args) {
     return interceptedFetch(...args);
   };
+  
   onRoute();
   setInterval(() => {
     if (location.pathname !== lastPath) {
