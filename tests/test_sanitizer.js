@@ -1,6 +1,7 @@
 /**
  * Comprehensive Automated Unit, Integration & Differential Security Test Suite for AI Copy Cleaner
  */
+// E2E Test Run: Testing gemini-and-chatgpt automated workflow
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
