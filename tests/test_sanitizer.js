@@ -309,10 +309,11 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
 });
 
 (async () => {
-  // 16. Clipboard Interception and Isolated World Copy Handling
-  await itAsync('Validates clipboard API interception and isolated-world copy event sanitization', async () => {
+  // 16. Clipboard Interception, Disabled State, and Isolated World Copy Handling
+  await itAsync('Validates clipboard API interception, disabled-state bypass, and isolated-world copy event sanitization', async () => {
     let capturedClipboardWrite = null;
     let capturedDataTransfer = null;
+    let mainWorldMessageListeners = [];
 
     class MockDataTransfer {
       setData(format, data) {
@@ -342,7 +343,9 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
 
     const sandbox = {
       window: {
-        addEventListener: () => {},
+        addEventListener: (type, fn) => {
+          if (type === 'message') mainWorldMessageListeners.push(fn);
+        },
         dispatchEvent: () => {}
       },
       navigator: {
@@ -365,7 +368,7 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
     const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
     vm.runInNewContext(injectCode, sandbox);
 
-    // Case A: Dirty HTML via navigator.clipboard.write is sanitized
+    // 1. autoCleanEnabled = true -> navigator.clipboard.write sanitizes HTML
     const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
     const item = new MockClipboardItem({
       'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
@@ -374,17 +377,37 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
     await sandbox.navigator.clipboard.write([item]);
     const writtenBlob = await capturedClipboardWrite[0].getType('text/html');
     const writtenText = await writtenBlob.text();
-    assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned by inject.js');
+    assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned by inject.js when enabled');
 
-    // Case B: DataTransfer.setData for text/html is sanitized
+    // 2. autoCleanEnabled = true -> DataTransfer.setData for text/html is sanitized
     const dt = new MockDataTransfer();
     sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-    assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized');
+    assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled');
 
-    // Case C: Isolated world copy event handler tests
+    // 3. autoCleanEnabled = false -> navigator.clipboard.write leaves HTML byte-for-byte unchanged
+    mainWorldMessageListeners.forEach((fn) => fn({
+      source: sandbox.window,
+      data: { type: 'aicc-sync-clean-state', enabled: false }
+    }));
+
+    capturedClipboardWrite = null;
+    const itemDisabled = new MockClipboardItem({
+      'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+    });
+    await sandbox.navigator.clipboard.write([itemDisabled]);
+    const untouchedBlob = await capturedClipboardWrite[0].getType('text/html');
+    const untouchedText = await untouchedBlob.text();
+    assert.strictEqual(untouchedText, dirtyHtml, 'HTML must remain unchanged when autoCleanEnabled=false');
+
+    // 4. autoCleanEnabled = false -> DataTransfer.setData leaves HTML unchanged
+    capturedDataTransfer = null;
+    sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+    assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when autoCleanEnabled=false');
+
+    // 5. Isolated world copy event handler tests (Enabled vs Disabled)
     let copyListeners = [];
     let storageData = { aicc_clean_count: 0 };
-    let toastShown = null;
+    let storageChangedListeners = [];
 
     const mockDoc = {
       addEventListener: (type, fn) => {
@@ -397,7 +420,7 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
         appendChild: () => {},
         getBoundingClientRect: () => ({})
       }),
-      documentElement: { appendChild: (el) => { toastShown = el; } }
+      documentElement: { appendChild: () => {} }
     };
 
     const contentSandbox = {
@@ -406,7 +429,8 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
         getSelection: () => ({
           rangeCount: 0,
           toString: () => 'Hello'
-        })
+        }),
+        postMessage: () => {}
       },
       chrome: {
         storage: {
@@ -415,7 +439,9 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
             get: (defs, cb) => cb(storageData),
             set: (data) => Object.assign(storageData, data)
           },
-          onChanged: { addListener: () => {} }
+          onChanged: {
+            addListener: (fn) => storageChangedListeners.push(fn)
+          }
         }
       },
       cleanAIHtml: cleanAIHtml,
@@ -428,7 +454,7 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
     const contentCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'content.js'), 'utf-8');
     vm.runInNewContext(contentCode, contentSandbox);
 
-    // Trigger copy event with dirty HTML
+    // Copy event when enabled with dirty HTML
     let clipboardSetData = {};
     let defaultPrevented = false;
     const fakeCopyEvent = {
@@ -440,9 +466,25 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
     };
 
     copyListeners.forEach((fn) => fn(fakeCopyEvent));
-    assert.strictEqual(defaultPrevented, true, 'Default copy must be intercepted');
+    assert.strictEqual(defaultPrevented, true, 'Default copy must be intercepted when enabled');
     assert.strictEqual(clipboardSetData['text/html'], '<p>Hello</p>', 'Sanitized HTML placed on clipboard');
     assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count incremented when HTML was modified');
+
+    // Copy event when disabled -> no sanitization and count not incremented
+    storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }));
+    clipboardSetData = {};
+    defaultPrevented = false;
+    const fakeCopyEventDisabled = {
+      clipboardData: {
+        getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
+        setData: (fmt, val) => { clipboardSetData[fmt] = val; }
+      },
+      preventDefault: () => { defaultPrevented = true; }
+    };
+
+    copyListeners.forEach((fn) => fn(fakeCopyEventDisabled));
+    assert.strictEqual(defaultPrevented, false, 'Default copy must not be prevented when autoCleanEnabled=false');
+    assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count must not increase when disabled');
   });
 
   console.log(`\n========================================`);
