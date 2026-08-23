@@ -167,7 +167,28 @@ it('Strictly rejects file:, ftp:, chrome-extension:, javascript:, data:text/html
   assert.ok(!clean.includes('<meta'), `<meta> tag must be stripped: ${clean}`);
 });
 
-// 12. Manifest V3 & Codebase Reference Integrity
+// 12. Security Review B001: Strips <template> tags and dangerous nested template content
+it('Strips <template> tags and prevents dangerous nested elements inside templates', () => {
+  const templatePayload = '<p>Safe before</p><template><img src="x" onerror="alert(1)"><script>alert(2)</script><p>Inside template</p></template><p>Safe after</p>';
+  const clean = cleanAIHtml(templatePayload);
+  assert.ok(!clean.includes('<template'), `<template> must be completely stripped: ${clean}`);
+  assert.ok(!clean.includes('onerror'), `onerror inside template must be removed: ${clean}`);
+  assert.ok(!clean.includes('<script'), `<script> inside template must be removed: ${clean}`);
+  assert.ok(clean.includes('<p>Safe before</p>'));
+  assert.ok(clean.includes('<p>Safe after</p>'));
+});
+
+// 13. Security Review B002: Tamper Resistance and API Immutability
+it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', () => {
+  const originalClean = globalThis.cleanAIHtml;
+  assert.strictEqual(typeof originalClean, 'function');
+  try {
+    globalThis.cleanAIHtml = () => 'hacked';
+  } catch (_) {}
+  assert.strictEqual(globalThis.cleanAIHtml, originalClean, 'globalThis.cleanAIHtml must be immutable');
+});
+
+// 14. Manifest V3 & Codebase Reference Integrity
 it('Validates manifest.json integrity and ensures all referenced files exist', () => {
   const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf-8');
   const manifest = JSON.parse(manifestRaw);

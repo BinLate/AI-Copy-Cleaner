@@ -142,8 +142,14 @@ function cleanDOMNode(node, options) {
         continue;
       }
 
-      // Xóa thẻ script, iframe, object, embed, style, meta, link nguy hiểm nếu có
-      if (['script', 'iframe', 'object', 'embed', 'style', 'meta', 'link'].includes(tagName)) {
+      // Xóa thẻ script, iframe, object, embed, style, meta, link, template nguy hiểm nếu có
+      if (['script', 'iframe', 'object', 'embed', 'style', 'meta', 'link', 'template'].includes(tagName)) {
+        child.remove();
+        continue;
+      }
+
+      // Xử lý an toàn nếu node là HTMLTemplateElement có .content DocumentFragment
+      if (child.content && child.content.nodeType === 11) {
         child.remove();
         continue;
       }
@@ -243,6 +249,7 @@ function cleanHtmlRegexFallback(html) {
   cleaned = cleaned.replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '');
   cleaned = cleaned.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
   cleaned = cleaned.replace(/<object\b[^<]*(?:(?!<\/object>)<[^<]*)*<\/object>/gi, '');
+  cleaned = cleaned.replace(/<template\b[^<]*(?:(?!<\/template>)<[^<]*)*<\/template>/gi, '');
   cleaned = cleaned.replace(/<embed\b[^>]*>/gi, '');
   cleaned = cleaned.replace(/<meta\b[^>]*>/gi, '');
   cleaned = cleaned.replace(/<link\b[^>]*>/gi, '');
@@ -258,7 +265,7 @@ function cleanHtmlRegexFallback(html) {
     const tagName = rawTagName.toLowerCase();
 
     // Thẻ nguy hiểm bị loại bỏ
-    if (['script', 'iframe', 'style', 'object', 'embed', 'meta', 'link'].includes(tagName)) {
+    if (['script', 'iframe', 'style', 'object', 'embed', 'meta', 'link', 'template'].includes(tagName)) {
       return '';
     }
 
@@ -328,19 +335,39 @@ function cleanHtmlRegexFallback(html) {
   return cleaned.trim();
 }
 
-// Gắn trực tiếp vào global scope để đảm bảo nạp thành công ở mọi môi trường
+// Đóng băng và gắn bất biến vào global scope để bảo vệ chống can thiệp từ page scripts
+const apiExports = Object.freeze({
+  cleanAIHtml,
+  isSafeUrl,
+  decodeHtmlEntities,
+  normalizeUrl
+});
+
+function defineImmutableProperty(target, name, value) {
+  try {
+    Object.defineProperty(target, name, {
+      value: value,
+      writable: false,
+      configurable: false,
+      enumerable: true
+    });
+  } catch (_) {
+    try { target[name] = value; } catch (__) {}
+  }
+}
+
 if (typeof window !== 'undefined') {
-  window.cleanAIHtml = cleanAIHtml;
-  window.isSafeUrl = isSafeUrl;
-  window.decodeHtmlEntities = decodeHtmlEntities;
-  window.normalizeUrl = normalizeUrl;
+  defineImmutableProperty(window, 'cleanAIHtml', cleanAIHtml);
+  defineImmutableProperty(window, 'isSafeUrl', isSafeUrl);
+  defineImmutableProperty(window, 'decodeHtmlEntities', decodeHtmlEntities);
+  defineImmutableProperty(window, 'normalizeUrl', normalizeUrl);
 }
 if (typeof globalThis !== 'undefined') {
-  globalThis.cleanAIHtml = cleanAIHtml;
-  globalThis.isSafeUrl = isSafeUrl;
-  globalThis.decodeHtmlEntities = decodeHtmlEntities;
-  globalThis.normalizeUrl = normalizeUrl;
+  defineImmutableProperty(globalThis, 'cleanAIHtml', cleanAIHtml);
+  defineImmutableProperty(globalThis, 'isSafeUrl', isSafeUrl);
+  defineImmutableProperty(globalThis, 'decodeHtmlEntities', decodeHtmlEntities);
+  defineImmutableProperty(globalThis, 'normalizeUrl', normalizeUrl);
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { cleanAIHtml, isSafeUrl, decodeHtmlEntities, normalizeUrl };
+  module.exports = apiExports;
 }
