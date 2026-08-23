@@ -1,4 +1,4 @@
-/** AI Copy Cleaner - MAIN world clipboard API interception (State-Controlled & Tamper-Resistant) */
+/** AI Copy Cleaner - MAIN world clipboard API interception (Tamper-Resistant & Safe Uninitialized Pass-Through) */
 (() => {
   'use strict';
   if (window.__aiCopyCleanerInjected) return;
@@ -8,21 +8,22 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
-  function isEnabled() {
-    try {
-      const cached = localStorage.getItem('aicc_clean_config');
-      if (cached !== null) {
-        const parsed = JSON.parse(cached);
-        return parsed.enabled !== false;
+  // Safe default is false (pass-through) until trusted extension state is pushed
+  let enabledState = false;
+
+  const addListener = window.addEventListener?.bind(window);
+  if (addListener) {
+    addListener('__aicc_clean_state_update__', (event) => {
+      if (typeof event?.detail?.enabled === 'boolean') {
+        enabledState = event.detail.enabled;
       }
-    } catch (_) {}
-    return document.documentElement?.dataset?.aiccCleanEnabled !== 'false';
+    });
   }
 
   const originalWrite = navigator.clipboard?.write;
   if (originalWrite) {
     navigator.clipboard.write = async function (items) {
-      if (!Array.isArray(items) || !isEnabled()) {
+      if (!Array.isArray(items) || !enabledState) {
         return originalWrite.apply(navigator.clipboard, arguments);
       }
       try {
@@ -51,7 +52,7 @@
   const originalSetData = window.DataTransfer?.prototype?.setData;
   if (originalSetData) {
     DataTransfer.prototype.setData = function (format, data) {
-      if (isEnabled() && format === 'text/html' && typeof data === 'string') {
+      if (enabledState && format === 'text/html' && typeof data === 'string') {
         const cleaned = sanitize(data);
         return originalSetData.call(this, format, cleaned);
       }

@@ -349,10 +349,11 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-// 16. Programmatic Clipboard Interception & Startup Cache Synchronization
-it('Validates inject.js programmatic clipboard interception respects cached and live disabled state', async () => {
+// 16. Programmatic Clipboard Interception & Safe Uninitialized Pass-Through
+it('Validates inject.js is safe pass-through when uninitialized and respects trusted event state updates', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
+  let eventListeners = [];
 
   class MockDataTransfer {
     setData(format, data) {
@@ -380,22 +381,15 @@ it('Validates inject.js programmatic clipboard interception respects cached and 
     }
   }
 
-  let localStore = new Map();
-  const mockLocalStorage = {
-    getItem: (k) => localStore.get(k) || null,
-    setItem: (k, v) => localStore.set(k, String(v)),
-    removeItem: (k) => localStore.delete(k)
-  };
-
   const sandbox = {
     window: {
-      addEventListener: () => {},
-      dispatchEvent: () => {}
+      addEventListener: (type, fn) => eventListeners.push({ type, fn }),
+      dispatchEvent: (e) => {
+        eventListeners.forEach(l => {
+          if (l.type === e.type) l.fn(e);
+        });
+      }
     },
-    document: {
-      documentElement: { dataset: {} }
-    },
-    localStorage: mockLocalStorage,
     navigator: {
       clipboard: {
         write: async (items) => {
@@ -413,39 +407,62 @@ it('Validates inject.js programmatic clipboard interception respects cached and 
   sandbox.window.DataTransfer = MockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
-  // Case A: Default state (enabled) -> inject.js sanitizes clipboard.write and DataTransfer
+  // Run inject.js in sandbox
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
   vm.runInNewContext(injectCode, sandbox);
 
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
-  const item = new MockClipboardItem({
+  const dt = new MockDataTransfer();
+
+  // Case A: Uninitialized state (before extension storage resolves) -> pass-through (fails safe)
+  const itemUninit = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
+  await sandbox.navigator.clipboard.write([itemUninit]);
+  const uninitBlob = await capturedClipboardWrite[0].getType('text/html');
+  const uninitText = await uninitBlob.text();
+  assert.strictEqual(uninitText, dirtyHtml, 'Uninitialized inject.js must be pass-through without modifying HTML');
 
-  await sandbox.navigator.clipboard.write([item]);
-  const writtenBlob = await capturedClipboardWrite[0].getType('text/html');
-  const writtenText = await writtenBlob.text();
-  assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned by inject.js when enabled');
-
-  const dt = new MockDataTransfer();
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled');
+  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer uninitialized must be pass-through');
 
-  // Case B: Synchronously disabled via localStorage cache -> leaves HTML byte-for-byte untouched
-  mockLocalStorage.setItem('aicc_clean_config', JSON.stringify({ enabled: false }));
+  // Case B: State update { enabled: true } -> sanitizes clipboard.write and DataTransfer
+  sandbox.window.dispatchEvent({
+    type: '__aicc_clean_state_update__',
+    detail: { enabled: true }
+  });
+
   capturedClipboardWrite = null;
   capturedDataTransfer = null;
+  const itemEnabled = new MockClipboardItem({
+    'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+  });
+  await sandbox.navigator.clipboard.write([itemEnabled]);
+  const cleanedBlob = await capturedClipboardWrite[0].getType('text/html');
+  const cleanedText = await cleanedBlob.text();
+  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabledState=true');
 
+  sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabledState=true');
+
+  // Case C: State update { enabled: false } -> pass-through without modifying HTML
+  sandbox.window.dispatchEvent({
+    type: '__aicc_clean_state_update__',
+    detail: { enabled: false }
+  });
+
+  capturedClipboardWrite = null;
+  capturedDataTransfer = null;
   const itemDisabled = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
   await sandbox.navigator.clipboard.write([itemDisabled]);
-  const untouchedBlob = await capturedClipboardWrite[0].getType('text/html');
-  const untouchedText = await untouchedBlob.text();
-  assert.strictEqual(untouchedText, dirtyHtml, 'HTML must remain unchanged when disabled via localStorage cache');
+  const disabledBlob = await capturedClipboardWrite[0].getType('text/html');
+  const disabledText = await disabledBlob.text();
+  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when enabledState=false');
 
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via cache');
+  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when enabledState=false');
 });
 
 console.log(`\n========================================`);
