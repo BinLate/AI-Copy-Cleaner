@@ -4,6 +4,9 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 
 console.log('🧪 Starting AI Copy Cleaner ChatGPT Fix Lag Test Suite...\n');
 
@@ -13,6 +16,18 @@ let failCount = 0;
 function test(name, fn) {
   try {
     fn();
+    console.log(`  ✅ PASS: ${name}`);
+    passCount++;
+  } catch (err) {
+    console.error(`  ❌ FAIL: ${name}`);
+    console.error(`     Error: ${err.message}\n`);
+    failCount++;
+  }
+}
+
+async function testAsync(name, fn) {
+  try {
+    await fn();
     console.log(`  ✅ PASS: ${name}`);
     passCount++;
   } catch (err) {
@@ -248,100 +263,222 @@ function createMockConversation(turnCount) {
   };
 }
 
-// 1. Trimming short vs long conversations
-test('Does not trim conversation within message limit', () => {
-  const data = createMockConversation(10);
-  const result = trimConversation(data, 15, 0);
-  assert.strictEqual(result.unchanged, true);
-  assert.strictEqual(result.hasOlderMessages, false);
-  assert.strictEqual(result.renderedTurns, 10);
-  assert.strictEqual(result.totalTurns, 10);
-});
+(async () => {
+  // 1. Trimming short vs long conversations
+  test('Does not trim conversation within message limit', () => {
+    const data = createMockConversation(10);
+    const result = trimConversation(data, 15, 0);
+    assert.strictEqual(result.unchanged, true);
+    assert.strictEqual(result.hasOlderMessages, false);
+    assert.strictEqual(result.renderedTurns, 10);
+    assert.strictEqual(result.totalTurns, 10);
+  });
 
-test('Trims long conversation down to message limit and sets correct pointers', () => {
-  const data = createMockConversation(30);
-  const result = trimConversation(data, 15, 0);
-  assert.strictEqual(result.unchanged, false);
-  assert.strictEqual(result.hasOlderMessages, true);
-  assert.strictEqual(result.totalTurns, 30);
-  assert.strictEqual(result.renderedTurns, 15);
+  test('Trims long conversation down to message limit and sets correct pointers', () => {
+    const data = createMockConversation(30);
+    const result = trimConversation(data, 15, 0);
+    assert.strictEqual(result.unchanged, false);
+    assert.strictEqual(result.hasOlderMessages, true);
+    assert.strictEqual(result.totalTurns, 30);
+    assert.strictEqual(result.renderedTurns, 15);
 
-  const trimmedMapping = result.data.mapping;
-  assert(trimmedMapping['root-node'], 'Root node preserved');
-  assert.strictEqual(trimmedMapping['root-node'].children[0], 'user-15');
-  assert.strictEqual(trimmedMapping['user-15'].parent, 'root-node');
-  assert.strictEqual(trimmedMapping['assistant-29'].children.length, 0);
-  assert.strictEqual(result.data.current_node, 'assistant-29');
-});
+    const trimmedMapping = result.data.mapping;
+    assert(trimmedMapping['root-node'], 'Root node preserved');
+    assert.strictEqual(trimmedMapping['root-node'].children[0], 'user-15');
+    assert.strictEqual(trimmedMapping['user-15'].parent, 'root-node');
+    assert.strictEqual(trimmedMapping['assistant-29'].children.length, 0);
+    assert.strictEqual(result.data.current_node, 'assistant-29');
+  });
 
-test('Respects extra window from Tải thêm', () => {
-  const data = createMockConversation(30);
-  const result = trimConversation(data, 15, 5); // 15 + 5 = 20 turns
-  assert.strictEqual(result.renderedTurns, 20);
-  assert.strictEqual(result.data.mapping['root-node'].children[0], 'user-10');
-});
+  test('Respects extra window from Tải thêm', () => {
+    const data = createMockConversation(30);
+    const result = trimConversation(data, 15, 5); // 15 + 5 = 20 turns
+    assert.strictEqual(result.renderedTurns, 20);
+    assert.strictEqual(result.data.mapping['root-node'].children[0], 'user-10');
+  });
 
-// 2. Preserves reasoning/thinking and tool call nodes within kept turns
-test('Preserves tool calls and thinking metadata attached to turns', () => {
-  const data = createMockConversation(20);
-  // Add a thinking node and tool call node inside turn 18
-  data.mapping['thinking-18'] = {
-    id: 'thinking-18',
-    message: {
-      id: 'msg-t-18',
-      author: { role: 'thinking' },
-      metadata: { is_visually_hidden_from_conversation: true }
-    },
-    parent: 'user-18',
-    children: ['assistant-18']
-  };
-  data.mapping['user-18'].children = ['thinking-18'];
-  data.mapping['assistant-18'].parent = 'thinking-18';
+  // 2. Preserves reasoning/thinking and tool call nodes within kept turns
+  test('Preserves tool calls and thinking metadata attached to turns', () => {
+    const data = createMockConversation(20);
+    data.mapping['thinking-18'] = {
+      id: 'thinking-18',
+      message: {
+        id: 'msg-t-18',
+        author: { role: 'thinking' },
+        metadata: { is_visually_hidden_from_conversation: true }
+      },
+      parent: 'user-18',
+      children: ['assistant-18']
+    };
+    data.mapping['user-18'].children = ['thinking-18'];
+    data.mapping['assistant-18'].parent = 'thinking-18';
 
-  const result = trimConversation(data, 5, 0);
-  assert.strictEqual(result.renderedTurns, 5);
-  const m = result.data.mapping;
-  assert(m['thinking-18'], 'Thinking node is preserved in the trimmed graph');
-  assert.strictEqual(m['thinking-18'].parent, 'user-18');
-  assert.strictEqual(m['assistant-18'].parent, 'thinking-18');
-});
+    const result = trimConversation(data, 5, 0);
+    assert.strictEqual(result.renderedTurns, 5);
+    const m = result.data.mapping;
+    assert(m['thinking-18'], 'Thinking node is preserved in the trimmed graph');
+    assert.strictEqual(m['thinking-18'].parent, 'user-18');
+    assert.strictEqual(m['assistant-18'].parent, 'thinking-18');
+  });
 
-// 3. Endpoint matching regex
-test('Matches standard and frontend-proxied conversation GET endpoints', () => {
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345'), true);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/f/conversation/12345'), true);
-  assert.strictEqual(isPotentialConversationPath('/backend-anon/conversation/12345'), true);
-  assert.strictEqual(isPotentialConversationPath('/backend-anon/f/conversation/12345'), true);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/shared_conversation/12345'), true);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345?model=gpt-4o'), true);
-});
+  // 3. Endpoint matching regex
+  test('Matches standard and frontend-proxied conversation GET endpoints', () => {
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/f/conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-anon/conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-anon/f/conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/shared_conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345?model=gpt-4o'), true);
+  });
 
-test('Rejects non-tree endpoints and static assets', () => {
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversations?offset=0&limit=28'), false);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversation_limit'), false);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/stream_status'), false);
-  assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/textdocs'), false);
-  assert.strictEqual(isPotentialConversationPath('/assets/index.js'), false);
-});
+  test('Rejects non-tree endpoints and static assets', () => {
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversations?offset=0&limit=28'), false);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversation_limit'), false);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/stream_status'), false);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/textdocs'), false);
+    assert.strictEqual(isPotentialConversationPath('/assets/index.js'), false);
+  });
 
-// 4. Conversation ID extraction from URL
-test('Extracts conversation ID from standard and Custom GPT paths', () => {
-  const match1 = '/c/67a12345-abcd'.match(PAGE_CONV);
-  assert.strictEqual(match1[1], '67a12345-abcd');
+  // 4. Conversation ID extraction from URL
+  test('Extracts conversation ID from standard and Custom GPT paths', () => {
+    const match1 = '/c/67a12345-abcd'.match(PAGE_CONV);
+    assert.strictEqual(match1[1], '67a12345-abcd');
 
-  const match2 = '/g/g-abc12345/c/67a99999-wxyz'.match(PAGE_CONV);
-  assert.strictEqual(match2[1], '67a99999-wxyz');
-});
+    const match2 = '/g/g-abc12345/c/67a99999-wxyz'.match(PAGE_CONV);
+    assert.strictEqual(match2[1], '67a99999-wxyz');
+  });
 
-// 5. sameConversationUrl normalization
-test('Normalizes and matches conversation URLs correctly', () => {
-  assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/12345/'), true);
-  assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345?model=4o', 'https://chatgpt.com/c/12345#bottom'), true);
-  assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/67890'), false);
-});
+  // 5. sameConversationUrl normalization
+  test('Normalizes and matches conversation URLs correctly', () => {
+    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/12345/'), true);
+    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345?model=4o', 'https://chatgpt.com/c/12345#bottom'), true);
+    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/67890'), false);
+  });
 
-console.log(`\n========================================`);
-console.log(`Test Results: ${passCount} passed, ${failCount} failed`);
-console.log(`========================================\n`);
+  // 6. Integration Test: mainWorld.js XHR and Fetch Interception Execution
+  await testAsync('Integrates and trims conversation in full mainWorld.js execution environment for both fetch and XHR', async () => {
+    const mock30 = createMockConversation(30);
+    const rawJsonString = JSON.stringify(mock30);
 
-if (failCount > 0) process.exit(1);
+    class MockXHR {
+      constructor() {
+        this.readyState = 0;
+        this.status = 0;
+        this.responseType = '';
+        this._responseText = '';
+        this._response = null;
+        this._listeners = [];
+      }
+      open(method, url) {
+        this._method = method;
+        this._url = url;
+        this.readyState = 1;
+      }
+      addEventListener(event, handler) {
+        this._listeners.push({ event, handler });
+      }
+      send() {
+        this.readyState = 4;
+        this.status = 200;
+        if (this.responseType === 'json') {
+          this._response = JSON.parse(rawJsonString);
+        } else {
+          this._responseText = rawJsonString;
+          this._response = rawJsonString;
+        }
+        for (const l of this._listeners) {
+          if (l.event === 'readystatechange' || l.event === 'load') {
+            l.handler();
+          }
+        }
+      }
+    }
+
+    Object.defineProperty(MockXHR.prototype, 'responseText', {
+      get() { return this._responseText; },
+      configurable: true
+    });
+    Object.defineProperty(MockXHR.prototype, 'response', {
+      get() { return this._response; },
+      configurable: true
+    });
+
+    const sandbox = {
+      window: {
+        location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com' },
+        fetch: async (url) => ({
+          status: 200,
+          statusText: 'OK',
+          headers: new Map([['content-type', 'application/json']]),
+          clone() {
+            return {
+              text: async () => rawJsonString
+            };
+          }
+        }),
+        postMessage: () => {},
+        XMLHttpRequest: MockXHR
+      },
+      document: {
+        documentElement: { dataset: {} }
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {}
+      },
+      sessionStorage: {
+        getItem: () => null,
+        setItem: () => {},
+        removeItem: () => {}
+      },
+      location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com' },
+      Headers: class { constructor() { this.m = new Map(); } set(k, v) { this.m.set(k, v); } delete(k) { this.m.delete(k); } },
+      Response: class { constructor(b, init) { this.body = b; this.status = init?.status; } text() { return Promise.resolve(this.body); } json() { return Promise.resolve(JSON.parse(this.body)); } },
+      Request: class { constructor(u, init) { this.url = u; this.method = init?.method || 'GET'; } },
+      setTimeout: setTimeout,
+      setInterval: setInterval,
+      clearInterval: clearInterval,
+      Promise: Promise,
+      URL: URL,
+      console: console
+    };
+    sandbox.window.Headers = sandbox.Headers;
+    sandbox.window.Response = sandbox.Response;
+    sandbox.window.Request = sandbox.Request;
+    sandbox.window.setTimeout = setTimeout;
+    sandbox.window.setInterval = setInterval;
+    sandbox.window.Promise = Promise;
+    sandbox.globalThis = sandbox.window;
+
+    const mainWorldCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'page', 'mainWorld.js'), 'utf-8');
+    vm.runInNewContext(mainWorldCode, sandbox);
+
+    // Test fetch interception
+    const fetchResponse = await sandbox.window.fetch('https://chatgpt.com/backend-api/conversation/test-uuid-1234');
+    const trimmedData = await fetchResponse.json();
+    assert.strictEqual(Object.keys(trimmedData.mapping).length, 31); // 1 root + 15 user + 15 assistant = 31
+
+    // Test XHR interception with responseType = 'json'
+    const xhrJson = new sandbox.window.XMLHttpRequest();
+    xhrJson.responseType = 'json';
+    xhrJson.open('GET', '/backend-api/conversation/test-uuid-1234');
+    xhrJson.send();
+    assert.strictEqual(typeof xhrJson.response, 'object');
+    assert.strictEqual(Object.keys(xhrJson.response.mapping).length, 31);
+
+    // Test XHR interception with default text response
+    const xhrText = new sandbox.window.XMLHttpRequest();
+    xhrText.open('GET', '/backend-api/conversation/test-uuid-1234');
+    xhrText.send();
+    assert.strictEqual(typeof xhrText.responseText, 'string');
+    const parsedFromText = JSON.parse(xhrText.responseText);
+    assert.strictEqual(Object.keys(parsedFromText.mapping).length, 31);
+  });
+
+  console.log(`\n========================================`);
+  console.log(`Test Results: ${passCount} passed, ${failCount} failed`);
+  console.log(`========================================\n`);
+
+  if (failCount > 0) process.exit(1);
+})();

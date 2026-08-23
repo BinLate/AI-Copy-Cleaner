@@ -82,7 +82,7 @@
   function requestParts(input, init) {
     let urlString;
     let method;
-    if (input instanceof Request) {
+    if (typeof Request !== 'undefined' && input instanceof Request) {
       urlString = input.url;
       method = String(init?.method || input.method || 'GET').toUpperCase();
     } else if (typeof URL !== 'undefined' && input instanceof URL) {
@@ -475,45 +475,73 @@
     return processConversationResponse(response);
   }
 
-  // Intercept XMLHttpRequest for complete coverage
+  // Intercept XMLHttpRequest with property getter descriptors to guarantee robust event and responseType handling
   const OriginalXHR = window.XMLHttpRequest;
   if (OriginalXHR && typeof OriginalXHR.prototype.open === 'function') {
     const origOpen = OriginalXHR.prototype.open;
-    const origSend = OriginalXHR.prototype.send;
+    const origResponseDesc = Object.getOwnPropertyDescriptor(OriginalXHR.prototype, 'response');
+    const origResponseTextDesc = Object.getOwnPropertyDescriptor(OriginalXHR.prototype, 'responseText');
 
     OriginalXHR.prototype.open = function (method, url, ...rest) {
       this.__aicc_method = String(method || 'GET').toUpperCase();
       this.__aicc_url = url;
+      this.__aicc_trimmed_data = null;
+      this.__aicc_trimmed_text = null;
       return origOpen.call(this, method, url, ...rest);
     };
 
-    OriginalXHR.prototype.send = function (body) {
-      const { method, pathname } = requestParts(this.__aicc_url, { method: this.__aicc_method });
-      if (!isTreeGet(method, pathname)) {
-        return origSend.call(this, body);
+    function getTrimmedXHR(xhr) {
+      if (xhr.__aicc_trimmed_data !== null) {
+        return xhr.__aicc_trimmed_data;
       }
-
-      const onReady = () => {
-        if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
-          try {
-            const rawText = this.responseText;
-            if (rawText) {
-              const data = nativeJSONParse(rawText);
-              if (looksLikeConversationData(data)) {
-                const trimmed = applyTrimToData(data, 'xhr');
-                if (trimmed !== data) {
-                  const trimmedText = JSON.stringify(trimmed);
-                  Object.defineProperty(this, 'responseText', { value: trimmedText, configurable: true });
-                  Object.defineProperty(this, 'response', { value: trimmedText, configurable: true });
-                }
-              }
-            }
-          } catch (_) {}
+      const { method, pathname } = requestParts(xhr.__aicc_url, { method: xhr.__aicc_method });
+      if (!isTreeGet(method, pathname) || xhr.readyState !== 4 || xhr.status < 200 || xhr.status >= 300) {
+        return null;
+      }
+      try {
+        let rawData = null;
+        if (xhr.responseType === 'json') {
+          rawData = origResponseDesc?.get ? origResponseDesc.get.call(xhr) : xhr.response;
+        } else if (!xhr.responseType || xhr.responseType === 'text') {
+          const rawText = origResponseTextDesc?.get ? origResponseTextDesc.get.call(xhr) : xhr.responseText;
+          if (rawText) rawData = nativeJSONParse(rawText);
         }
-      };
-      this.addEventListener('readystatechange', onReady);
-      return origSend.call(this, body);
-    };
+        if (looksLikeConversationData(rawData)) {
+          xhr.__aicc_trimmed_data = applyTrimToData(rawData, 'xhr');
+          xhr.__aicc_trimmed_text = JSON.stringify(xhr.__aicc_trimmed_data);
+          return xhr.__aicc_trimmed_data;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    if (origResponseDesc?.get) {
+      Object.defineProperty(OriginalXHR.prototype, 'response', {
+        get() {
+          const trimmed = getTrimmedXHR(this);
+          if (trimmed !== null) {
+            return this.responseType === 'json' ? trimmed : (this.__aicc_trimmed_text || JSON.stringify(trimmed));
+          }
+          return origResponseDesc.get.call(this);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+
+    if (origResponseTextDesc?.get) {
+      Object.defineProperty(OriginalXHR.prototype, 'responseText', {
+        get() {
+          const trimmed = getTrimmedXHR(this);
+          if (trimmed !== null) {
+            return this.__aicc_trimmed_text || JSON.stringify(trimmed);
+          }
+          return origResponseTextDesc.get.call(this);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
   }
 
   async function initWasm() {
