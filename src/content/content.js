@@ -1,12 +1,86 @@
 /** AI Copy Cleaner - isolated world copy handler & UI toast */
 (() => {
   'use strict';
-  let enabled = true;
+  // Safe startup: uninitialized/unresolved state defaults to pass-through (disabled)
+  let enabled = false;
+  let stateResolved = false;
+
+  const sessionToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  // Dynamically inject MAIN-world clipboard hook with private closure token
+  try {
+    const mainScript = (typeof cleanAIHtml === 'function' ? `window.cleanAIHtml = ${cleanAIHtml.toString()};\n` : '') +
+      `(${function(token) {
+        'use strict';
+        if (window.__aiCopyCleanerInjected) return;
+        window.__aiCopyCleanerInjected = true;
+
+        const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
+        if (typeof sanitize !== 'function') return;
+
+        let enabledState = false;
+
+        const addListener = window.addEventListener?.bind(window);
+        if (addListener && token) {
+          addListener('__aicc_state_' + token, (event) => {
+            if (typeof event?.detail?.enabled === 'boolean' && event.detail?.token === token) {
+              enabledState = event.detail.enabled;
+            }
+          });
+        }
+
+        const originalWrite = navigator.clipboard?.write;
+        if (originalWrite) {
+          navigator.clipboard.write = async function (items) {
+            if (!Array.isArray(items) || !enabledState) {
+              return originalWrite.apply(navigator.clipboard, arguments);
+            }
+            try {
+              const output = [];
+              for (const item of items) {
+                if (item.types?.includes('text/html')) {
+                  const htmlBlob = await item.getType('text/html');
+                  const raw = await htmlBlob.text();
+                  const cleaned = sanitize(raw);
+                  const types = {};
+                  for (const type of item.types) {
+                    types[type] = type === 'text/html' ? new Blob([cleaned], { type: 'text/html' }) : await item.getType(type);
+                  }
+                  output.push(new ClipboardItem(types));
+                } else {
+                  output.push(item);
+                }
+              }
+              return originalWrite.call(navigator.clipboard, output);
+            } catch (_) {
+              return originalWrite.apply(navigator.clipboard, arguments);
+            }
+          };
+        }
+
+        const originalSetData = window.DataTransfer?.prototype?.setData;
+        if (originalSetData) {
+          DataTransfer.prototype.setData = function (format, data) {
+            if (enabledState && format === 'text/html' && typeof data === 'string') {
+              const cleaned = sanitize(data);
+              return originalSetData.call(this, format, cleaned);
+            }
+            return originalSetData.call(this, format, data);
+          };
+        }
+      }.toString()})(${JSON.stringify(sessionToken)});`;
+
+    const scriptEl = document.createElement('script');
+    scriptEl.textContent = mainScript;
+    (document.head || document.documentElement).appendChild(scriptEl);
+    scriptEl.remove();
+  } catch (_) {}
 
   function updateEnabled(val) {
     enabled = val !== false;
+    stateResolved = true;
     try {
-      window.dispatchEvent(new CustomEvent('__aicc_clean_state_update__', { detail: { enabled } }));
+      window.dispatchEvent(new CustomEvent('__aicc_state_' + sessionToken, { detail: { enabled, token: sessionToken } }));
     } catch (_) {}
   }
 
@@ -29,7 +103,7 @@
   } catch (_) {}
 
   function recordCleanAction() {
-    if (!enabled) return;
+    if (!stateResolved || !enabled) return;
     try {
       chrome.storage.local.get({ aicc_clean_count: 0 }, (res) => {
         const next = (res.aicc_clean_count || 0) + 1;
@@ -40,7 +114,8 @@
   }
 
   document.addEventListener('copy', (event) => {
-    if (!enabled || typeof cleanAIHtml !== 'function') return;
+    // Fail safe: if settings are not resolved yet or disabled, do not intercept
+    if (!stateResolved || !enabled || typeof cleanAIHtml !== 'function') return;
     let rawHtml = '';
     if (event.clipboardData) {
       try {

@@ -1,5 +1,5 @@
-/** AI Copy Cleaner - MAIN world clipboard API interception (Tamper-Resistant & Safe Uninitialized Pass-Through) */
-(() => {
+/** AI Copy Cleaner - MAIN world clipboard API interception (Token-Protected & Safe Startup) */
+(function(sessionToken) {
   'use strict';
   if (window.__aiCopyCleanerInjected) return;
   window.__aiCopyCleanerInjected = true;
@@ -8,13 +8,13 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
-  // Safe default is false (pass-through) until trusted extension state is pushed
+  // Default is false (pass-through) until trusted extension storage state is pushed
   let enabledState = false;
 
   const addListener = window.addEventListener?.bind(window);
-  if (addListener) {
-    addListener('__aicc_clean_state_update__', (event) => {
-      if (typeof event?.detail?.enabled === 'boolean') {
+  if (addListener && sessionToken) {
+    addListener('__aicc_state_' + sessionToken, (event) => {
+      if (typeof event?.detail?.enabled === 'boolean' && event.detail?.token === sessionToken) {
         enabledState = event.detail.enabled;
       }
     });
@@ -59,4 +59,4 @@
       return originalSetData.call(this, format, data);
     };
   }
-})();
+});

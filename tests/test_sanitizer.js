@@ -212,10 +212,11 @@ it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', 
   assert.strictEqual(globalThis.cleanAIHtml, originalClean, 'globalThis.cleanAIHtml must be immutable');
 });
 
-// 14. Isolated World Copy Event Sanitization & State Management
-it('Validates content.js sanitizes copy events when enabled and bypasses when disabled', () => {
+// 14. Isolated World Copy Event Sanitization & Safe Startup
+it('Validates content.js is safe pass-through before storage resolution and sanitizes when enabled', () => {
   let copyListeners = [];
   let storageData = { aicc_clean_count: 0 };
+  let storageSyncCb = null;
   let storageChangedListeners = [];
 
   const mockDoc = {
@@ -229,6 +230,7 @@ it('Validates content.js sanitizes copy events when enabled and bypasses when di
       appendChild: () => {},
       getBoundingClientRect: () => ({})
     }),
+    head: { appendChild: () => {} },
     documentElement: { appendChild: () => {} }
   };
 
@@ -238,11 +240,14 @@ it('Validates content.js sanitizes copy events when enabled and bypasses when di
       getSelection: () => ({
         rangeCount: 0,
         toString: () => 'Hello'
-      })
+      }),
+      dispatchEvent: () => {}
     },
     chrome: {
       storage: {
-        sync: { get: (defs, cb) => cb({ autoCleanEnabled: true }) },
+        sync: {
+          get: (defs, cb) => { storageSyncCb = cb; } // Deferred to test uninitialized state
+        },
         local: {
           get: (defs, cb) => cb(storageData),
           set: (data) => Object.assign(storageData, data)
@@ -262,11 +267,12 @@ it('Validates content.js sanitizes copy events when enabled and bypasses when di
   const contentCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'content.js'), 'utf-8');
   vm.runInNewContext(contentCode, contentSandbox);
 
-  // Case A: When enabled, dirty HTML is sanitized on copy
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
+
+  // Case A: Before storage callback resolves (uninitialized startup) -> must NOT intercept (fail safe pass-through)
   let clipboardSetData = {};
   let defaultPrevented = false;
-  const fakeCopyEvent = {
+  const fakeCopyUninit = {
     clipboardData: {
       getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
       setData: (fmt, val) => { clipboardSetData[fmt] = val; }
@@ -274,12 +280,30 @@ it('Validates content.js sanitizes copy events when enabled and bypasses when di
     preventDefault: () => { defaultPrevented = true; }
   };
 
-  copyListeners.forEach((fn) => fn(fakeCopyEvent));
+  copyListeners.forEach((fn) => fn(fakeCopyUninit));
+  assert.strictEqual(defaultPrevented, false, 'Uninitialized copy must be pass-through without intercepting');
+  assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when uninitialized');
+
+  // Resolve storage to enabled: true
+  storageSyncCb({ autoCleanEnabled: true });
+
+  // Case B: When enabled and resolved, dirty HTML is sanitized on copy
+  clipboardSetData = {};
+  defaultPrevented = false;
+  const fakeCopyEnabled = {
+    clipboardData: {
+      getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
+      setData: (fmt, val) => { clipboardSetData[fmt] = val; }
+    },
+    preventDefault: () => { defaultPrevented = true; }
+  };
+
+  copyListeners.forEach((fn) => fn(fakeCopyEnabled));
   assert.strictEqual(defaultPrevented, true, 'Default copy must be intercepted when enabled');
   assert.strictEqual(clipboardSetData['text/html'], '<p>Hello</p>', 'Sanitized HTML placed on clipboard');
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count incremented when HTML was modified');
 
-  // Case B: When clean HTML is copied, count is not incremented
+  // Case C: When clean HTML is copied, count is not incremented
   const cleanHtml = '<p>Hello</p>';
   clipboardSetData = {};
   defaultPrevented = false;
@@ -294,7 +318,7 @@ it('Validates content.js sanitizes copy events when enabled and bypasses when di
   copyListeners.forEach((fn) => fn(fakeCopyClean));
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count must not increase for already clean HTML');
 
-  // Case C: When disabled via storage, copy is not intercepted
+  // Case D: When disabled via storage, copy is not intercepted
   storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }));
   clipboardSetData = {};
   defaultPrevented = false;
@@ -349,8 +373,8 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-// 16. Programmatic Clipboard Interception & Safe Uninitialized Pass-Through
-it('Validates inject.js is safe pass-through when uninitialized and respects trusted event state updates', async () => {
+// 16. Programmatic Clipboard Interception & Token-Protected State Updates
+it('Validates inject.js is safe pass-through when uninitialized and strictly rejects forged events without token', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
   let eventListeners = [];
@@ -407,14 +431,17 @@ it('Validates inject.js is safe pass-through when uninitialized and respects tru
   sandbox.window.DataTransfer = MockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
-  // Run inject.js in sandbox
+  const validToken = 'secret_test_token_xyz_123';
+
+  // Run inject.js closure with validToken
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
-  vm.runInNewContext(injectCode, sandbox);
+  const injectFn = vm.runInNewContext(injectCode, sandbox);
+  injectFn(validToken);
 
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
   const dt = new MockDataTransfer();
 
-  // Case A: Uninitialized state (before extension storage resolves) -> pass-through (fails safe)
+  // Case A: Uninitialized state -> pass-through
   const itemUninit = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
@@ -426,10 +453,26 @@ it('Validates inject.js is safe pass-through when uninitialized and respects tru
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
   assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer uninitialized must be pass-through');
 
-  // Case B: State update { enabled: true } -> sanitizes clipboard.write and DataTransfer
+  // Case B: Hostile page scripts dispatching forged events without token or invalid token -> ignored
   sandbox.window.dispatchEvent({
-    type: '__aicc_clean_state_update__',
+    type: '__aicc_state_' + validToken,
+    detail: { enabled: true, token: 'wrong_token' }
+  });
+  sandbox.window.dispatchEvent({
+    type: '__aicc_state_forged',
     detail: { enabled: true }
+  });
+
+  capturedClipboardWrite = null;
+  await sandbox.navigator.clipboard.write([itemUninit]);
+  const ignoredBlob = await capturedClipboardWrite[0].getType('text/html');
+  const ignoredText = await ignoredBlob.text();
+  assert.strictEqual(ignoredText, dirtyHtml, 'Forged events without matching token must be ignored');
+
+  // Case C: Trusted event with validToken -> enables sanitization
+  sandbox.window.dispatchEvent({
+    type: '__aicc_state_' + validToken,
+    detail: { enabled: true, token: validToken }
   });
 
   capturedClipboardWrite = null;
@@ -445,10 +488,10 @@ it('Validates inject.js is safe pass-through when uninitialized and respects tru
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
   assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabledState=true');
 
-  // Case C: State update { enabled: false } -> pass-through without modifying HTML
+  // Case D: Trusted event disabling -> pass-through
   sandbox.window.dispatchEvent({
-    type: '__aicc_clean_state_update__',
-    detail: { enabled: false }
+    type: '__aicc_state_' + validToken,
+    detail: { enabled: false, token: validToken }
   });
 
   capturedClipboardWrite = null;
