@@ -2,38 +2,24 @@
 (() => {
   'use strict';
   let enabled = true;
-  const sessionToken = 'aicc_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   try {
-    if (document.documentElement) {
-      document.documentElement.dataset.aiccBridgeToken = sessionToken;
-      document.documentElement.dataset.aiccCleanEnabled = 'true';
-    }
-  } catch (_) {}
-
-  function syncState(val) {
-    enabled = val !== false;
-    try {
-      if (document.documentElement) {
-        document.documentElement.dataset.aiccCleanEnabled = String(enabled);
-      }
-    } catch (_) {}
-  }
-
-  try {
+    const applyEnabled = (val) => {
+      enabled = val !== false;
+    };
     chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items) {
-        syncState(items.autoCleanEnabled);
+        applyEnabled(items.autoCleanEnabled);
       }
     });
     chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined) {
-        syncState(items.autoCleanEnabled);
+        applyEnabled(items.autoCleanEnabled);
       }
     });
     chrome.storage.onChanged.addListener((changes) => {
       if (changes.autoCleanEnabled) {
-        syncState(changes.autoCleanEnabled.newValue);
+        applyEnabled(changes.autoCleanEnabled.newValue);
       }
     });
   } catch (_) {}
@@ -48,13 +34,6 @@
     } catch (_) {}
     showToast('✨ Đã làm sạch HTML khi copy');
   }
-
-  // Listen to authenticated MAIN world clipboard interception notifications
-  window.addEventListener('aicc-bridge-notify', (event) => {
-    if (event.detail?.token === sessionToken) {
-      recordCleanAction();
-    }
-  });
 
   document.addEventListener('copy', (event) => {
     if (!enabled || typeof cleanAIHtml !== 'function') return;

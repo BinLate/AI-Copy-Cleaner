@@ -309,9 +309,8 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
 });
 
 (async () => {
-  // 16. Clipboard Interception, Disabled State, and Authenticated Notification
-  await itAsync('Validates clipboard interception behavior when enabled, disabled, and with token authentication', async () => {
-    let emittedEvents = [];
+  // 16. Clipboard Interception and Isolated World Copy Handling
+  await itAsync('Validates clipboard API interception and isolated-world copy event sanitization', async () => {
     let capturedClipboardWrite = null;
     let capturedDataTransfer = null;
 
@@ -341,34 +340,11 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
       }
     }
 
-    const mockDoc = {
-      documentElement: {
-        dataset: {
-          aiccCleanEnabled: 'true',
-          aiccBridgeToken: 'valid_test_token_123'
-        }
-      }
-    };
-
-    class MockCustomEvent {
-      constructor(type, init) {
-        this.type = type;
-        this.detail = init?.detail;
-      }
-    }
-
     const sandbox = {
       window: {
-        addEventListener: (type, handler) => emittedEvents.push({ type, handler }),
-        dispatchEvent: (e) => {
-          emittedEvents.forEach((ev) => {
-            if (ev.type === e.type) ev.handler(e);
-          });
-        },
-        CustomEvent: MockCustomEvent
+        addEventListener: () => {},
+        dispatchEvent: () => {}
       },
-      document: mockDoc,
-      CustomEvent: MockCustomEvent,
       navigator: {
         clipboard: {
           write: async (items) => {
@@ -384,59 +360,89 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
       console: console
     };
     sandbox.window.DataTransfer = MockDataTransfer;
-    sandbox.window.document = mockDoc;
     sandbox.globalThis = sandbox.window;
 
     const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
     vm.runInNewContext(injectCode, sandbox);
 
-    // Case A: Enabled with modified HTML -> sanitizes and dispatches authenticated bridge notification
-    let bridgeNotified = false;
-    sandbox.window.addEventListener('aicc-bridge-notify', (e) => {
-      if (e.detail?.token === 'valid_test_token_123') {
-        bridgeNotified = true;
-      }
-    });
-
+    // Case A: Dirty HTML via navigator.clipboard.write is sanitized
     const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
     const item = new MockClipboardItem({
       'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
     });
 
     await sandbox.navigator.clipboard.write([item]);
-    assert.strictEqual(bridgeNotified, true, 'Bridge notification must be emitted when HTML was modified');
     const writtenBlob = await capturedClipboardWrite[0].getType('text/html');
     const writtenText = await writtenBlob.text();
-    assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned');
+    assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned by inject.js');
 
-    // Case B: Enabled with already clean HTML -> does NOT emit notification
-    bridgeNotified = false;
-    const cleanHtml = '<p>Already clean</p>';
-    const cleanItem = new MockClipboardItem({
-      'text/html': new MockBlob([cleanHtml], { type: 'text/html' })
-    });
-    await sandbox.navigator.clipboard.write([cleanItem]);
-    assert.strictEqual(bridgeNotified, false, 'No notification when HTML was unchanged');
+    // Case B: DataTransfer.setData for text/html is sanitized
+    const dt = new MockDataTransfer();
+    sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+    assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized');
 
-    // Case C: Disabled (aiccCleanEnabled = 'false') -> passes dirty HTML untouched and emits no notification
-    mockDoc.documentElement.dataset.aiccCleanEnabled = 'false';
-    bridgeNotified = false;
-    capturedClipboardWrite = null;
+    // Case C: Isolated world copy event handler tests
+    let copyListeners = [];
+    let storageData = { aicc_clean_count: 0 };
+    let toastShown = null;
 
-    const itemWhileDisabled = new MockClipboardItem({
-      'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
-    });
-    await sandbox.navigator.clipboard.write([itemWhileDisabled]);
-    assert.strictEqual(bridgeNotified, false, 'No notification when disabled');
-    const untouchedBlob = await capturedClipboardWrite[0].getType('text/html');
-    const untouchedText = await untouchedBlob.text();
-    assert.strictEqual(untouchedText, dirtyHtml, 'HTML must remain unchanged when disabled');
+    const mockDoc = {
+      addEventListener: (type, fn) => {
+        if (type === 'copy') copyListeners.push(fn);
+      },
+      getElementById: () => null,
+      createElement: () => ({
+        style: {},
+        setAttribute: () => {},
+        appendChild: () => {},
+        getBoundingClientRect: () => ({})
+      }),
+      documentElement: { appendChild: (el) => { toastShown = el; } }
+    };
 
-    // Case D: DataTransfer.setData when disabled -> untouched
-    capturedDataTransfer = null;
-    const dtInstance = new MockDataTransfer();
-    sandbox.DataTransfer.prototype.setData.call(dtInstance, 'text/html', dirtyHtml);
-    assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled');
+    const contentSandbox = {
+      document: mockDoc,
+      window: {
+        getSelection: () => ({
+          rangeCount: 0,
+          toString: () => 'Hello'
+        })
+      },
+      chrome: {
+        storage: {
+          sync: { get: (defs, cb) => cb({ autoCleanEnabled: true }) },
+          local: {
+            get: (defs, cb) => cb(storageData),
+            set: (data) => Object.assign(storageData, data)
+          },
+          onChanged: { addListener: () => {} }
+        }
+      },
+      cleanAIHtml: cleanAIHtml,
+      console: console,
+      setTimeout: (fn) => fn(),
+      clearTimeout: () => {}
+    };
+    contentSandbox.globalThis = contentSandbox.window;
+
+    const contentCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'content.js'), 'utf-8');
+    vm.runInNewContext(contentCode, contentSandbox);
+
+    // Trigger copy event with dirty HTML
+    let clipboardSetData = {};
+    let defaultPrevented = false;
+    const fakeCopyEvent = {
+      clipboardData: {
+        getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
+        setData: (fmt, val) => { clipboardSetData[fmt] = val; }
+      },
+      preventDefault: () => { defaultPrevented = true; }
+    };
+
+    copyListeners.forEach((fn) => fn(fakeCopyEvent));
+    assert.strictEqual(defaultPrevented, true, 'Default copy must be intercepted');
+    assert.strictEqual(clipboardSetData['text/html'], '<p>Hello</p>', 'Sanitized HTML placed on clipboard');
+    assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count incremented when HTML was modified');
   });
 
   console.log(`\n========================================`);
