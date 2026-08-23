@@ -8,6 +8,12 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
+  function notifyCleaned() {
+    try {
+      window.postMessage({ type: 'aicc-cleaned-toast' }, '*');
+    } catch (_) {}
+  }
+
   const originalWrite = navigator.clipboard?.write;
   if (originalWrite) {
     navigator.clipboard.write = async function (items) {
@@ -32,9 +38,24 @@
             output.push(item);
           }
         }
-        return originalWrite.call(navigator.clipboard, output);
+        const res = await originalWrite.call(navigator.clipboard, output);
+        notifyCleaned();
+        return res;
       } catch (_) {
         return originalWrite.apply(navigator.clipboard, arguments);
+      }
+    };
+  }
+
+  const originalWriteText = navigator.clipboard?.writeText;
+  if (originalWriteText) {
+    navigator.clipboard.writeText = async function (text) {
+      try {
+        const res = await originalWriteText.apply(navigator.clipboard, arguments);
+        notifyCleaned();
+        return res;
+      } catch (_) {
+        return originalWriteText.apply(navigator.clipboard, arguments);
       }
     };
   }
@@ -44,6 +65,7 @@
     DataTransfer.prototype.setData = function (format, data) {
       if (format === 'text/html' && typeof data === 'string') {
         const cleaned = sanitize(data);
+        notifyCleaned();
         return originalSetData.call(this, format, cleaned);
       }
       return originalSetData.call(this, format, data);

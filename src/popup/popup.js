@@ -67,7 +67,7 @@ async function load() {
 async function save() {
   const state = currentState();
   await Promise.all([
-    chrome.storage.local.set({ [OPT_KEY]: state.opt }),
+    chrome.storage.local.set({ [OPT_KEY]: state.opt, autoCleanEnabled: state.clean }),
     chrome.storage.sync.set({ autoCleanEnabled: state.clean })
   ]);
   saved = state;
