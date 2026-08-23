@@ -2,24 +2,38 @@
 (() => {
   'use strict';
   let enabled = true;
+  const sessionToken = 'aicc_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   try {
-    const applyEnabled = (val) => {
-      enabled = val !== false;
-    };
+    if (document.documentElement) {
+      document.documentElement.dataset.aiccBridgeToken = sessionToken;
+      document.documentElement.dataset.aiccCleanEnabled = 'true';
+    }
+  } catch (_) {}
+
+  function syncState(val) {
+    enabled = val !== false;
+    try {
+      if (document.documentElement) {
+        document.documentElement.dataset.aiccCleanEnabled = String(enabled);
+      }
+    } catch (_) {}
+  }
+
+  try {
     chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items) {
-        applyEnabled(items.autoCleanEnabled);
+        syncState(items.autoCleanEnabled);
       }
     });
     chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined) {
-        applyEnabled(items.autoCleanEnabled);
+        syncState(items.autoCleanEnabled);
       }
     });
     chrome.storage.onChanged.addListener((changes) => {
       if (changes.autoCleanEnabled) {
-        applyEnabled(changes.autoCleanEnabled.newValue);
+        syncState(changes.autoCleanEnabled.newValue);
       }
     });
   } catch (_) {}
@@ -35,10 +49,11 @@
     showToast('✨ Đã làm sạch HTML khi copy');
   }
 
-  // Listen to MAIN world clipboard interception notifications
-  window.addEventListener('message', (event) => {
-    if (event.source !== window || event.data?.type !== 'aicc-cleaned-toast') return;
-    recordCleanAction();
+  // Listen to authenticated MAIN world clipboard interception notifications
+  window.addEventListener('aicc-bridge-notify', (event) => {
+    if (event.detail?.token === sessionToken) {
+      recordCleanAction();
+    }
   });
 
   document.addEventListener('copy', (event) => {
@@ -64,17 +79,15 @@
     if (rawHtml) {
       const cleaned = cleanAIHtml(rawHtml);
       if (cleaned && event.clipboardData) {
+        const isChanged = cleaned !== rawHtml;
         event.preventDefault();
         event.clipboardData.setData('text/html', cleaned);
         const plain = window.getSelection?.().toString() || event.clipboardData.getData('text/plain') || '';
         if (plain) event.clipboardData.setData('text/plain', plain);
-        recordCleanAction();
-        return;
+        if (isChanged) {
+          recordCleanAction();
+        }
       }
-    }
-    const plain = window.getSelection?.().toString();
-    if (plain) {
-      recordCleanAction();
     }
   }, true);
 

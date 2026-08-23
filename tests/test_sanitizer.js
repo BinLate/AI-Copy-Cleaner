@@ -41,6 +41,18 @@ function it(desc, fn) {
   }
 }
 
+async function itAsync(desc, fn) {
+  try {
+    await fn();
+    console.log(`  ✅ PASS: ${desc}`);
+    passed++;
+  } catch (err) {
+    console.error(`  ❌ FAIL: ${desc}`);
+    console.error(`     Error: ${err.message}`);
+    failed++;
+  }
+}
+
 // 1. ChatGPT tests
 it('Cleans ChatGPT paragraph with data-* and random classes', () => {
   const dirty = '<p class="whitespace-pre-wrap font-sans text-base" data-message-author-role="assistant" data-message-id="123">Xin chào <strong>thế giới</strong>!</p>';
@@ -217,6 +229,9 @@ it('Validates inject.js cannot be bypassed or disabled by hostile page scripts e
       dispatchEvent: (e) => events.forEach(ev => ev.type === e.type && ev.handler(e)),
       DataTransfer: function() {}
     },
+    document: {
+      documentElement: { dataset: { aiccCleanEnabled: 'true' } }
+    },
     navigator: {
       clipboard: {
         write: async (items) => items
@@ -293,10 +308,143 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-console.log(`\n========================================`);
-console.log(`Test Results: ${passed} passed, ${failed} failed`);
-console.log(`========================================\n`);
+(async () => {
+  // 16. Clipboard Interception, Disabled State, and Authenticated Notification
+  await itAsync('Validates clipboard interception behavior when enabled, disabled, and with token authentication', async () => {
+    let emittedEvents = [];
+    let capturedClipboardWrite = null;
+    let capturedDataTransfer = null;
 
-if (failed > 0) {
-  process.exit(1);
-}
+    class MockDataTransfer {
+      setData(format, data) {
+        capturedDataTransfer = { format, data };
+      }
+    }
+
+    class MockBlob {
+      constructor(parts, opts) {
+        this.parts = parts;
+        this.type = opts?.type;
+      }
+      async text() {
+        return this.parts.join('');
+      }
+    }
+
+    class MockClipboardItem {
+      constructor(types) {
+        this.types = Object.keys(types);
+        this._types = types;
+      }
+      async getType(t) {
+        return this._types[t];
+      }
+    }
+
+    const mockDoc = {
+      documentElement: {
+        dataset: {
+          aiccCleanEnabled: 'true',
+          aiccBridgeToken: 'valid_test_token_123'
+        }
+      }
+    };
+
+    class MockCustomEvent {
+      constructor(type, init) {
+        this.type = type;
+        this.detail = init?.detail;
+      }
+    }
+
+    const sandbox = {
+      window: {
+        addEventListener: (type, handler) => emittedEvents.push({ type, handler }),
+        dispatchEvent: (e) => {
+          emittedEvents.forEach((ev) => {
+            if (ev.type === e.type) ev.handler(e);
+          });
+        },
+        CustomEvent: MockCustomEvent
+      },
+      document: mockDoc,
+      CustomEvent: MockCustomEvent,
+      navigator: {
+        clipboard: {
+          write: async (items) => {
+            capturedClipboardWrite = items;
+            return items;
+          }
+        }
+      },
+      DataTransfer: MockDataTransfer,
+      Blob: MockBlob,
+      ClipboardItem: MockClipboardItem,
+      cleanAIHtml: cleanAIHtml,
+      console: console
+    };
+    sandbox.window.DataTransfer = MockDataTransfer;
+    sandbox.window.document = mockDoc;
+    sandbox.globalThis = sandbox.window;
+
+    const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
+    vm.runInNewContext(injectCode, sandbox);
+
+    // Case A: Enabled with modified HTML -> sanitizes and dispatches authenticated bridge notification
+    let bridgeNotified = false;
+    sandbox.window.addEventListener('aicc-bridge-notify', (e) => {
+      if (e.detail?.token === 'valid_test_token_123') {
+        bridgeNotified = true;
+      }
+    });
+
+    const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
+    const item = new MockClipboardItem({
+      'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+    });
+
+    await sandbox.navigator.clipboard.write([item]);
+    assert.strictEqual(bridgeNotified, true, 'Bridge notification must be emitted when HTML was modified');
+    const writtenBlob = await capturedClipboardWrite[0].getType('text/html');
+    const writtenText = await writtenBlob.text();
+    assert.strictEqual(writtenText, '<p>Hello</p>', 'HTML must be cleaned');
+
+    // Case B: Enabled with already clean HTML -> does NOT emit notification
+    bridgeNotified = false;
+    const cleanHtml = '<p>Already clean</p>';
+    const cleanItem = new MockClipboardItem({
+      'text/html': new MockBlob([cleanHtml], { type: 'text/html' })
+    });
+    await sandbox.navigator.clipboard.write([cleanItem]);
+    assert.strictEqual(bridgeNotified, false, 'No notification when HTML was unchanged');
+
+    // Case C: Disabled (aiccCleanEnabled = 'false') -> passes dirty HTML untouched and emits no notification
+    mockDoc.documentElement.dataset.aiccCleanEnabled = 'false';
+    bridgeNotified = false;
+    capturedClipboardWrite = null;
+
+    const itemWhileDisabled = new MockClipboardItem({
+      'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
+    });
+    await sandbox.navigator.clipboard.write([itemWhileDisabled]);
+    assert.strictEqual(bridgeNotified, false, 'No notification when disabled');
+    const untouchedBlob = await capturedClipboardWrite[0].getType('text/html');
+    const untouchedText = await untouchedBlob.text();
+    assert.strictEqual(untouchedText, dirtyHtml, 'HTML must remain unchanged when disabled');
+
+    // Case D: DataTransfer.setData when disabled -> untouched
+    capturedDataTransfer = null;
+    const dtInstance = new MockDataTransfer();
+    sandbox.DataTransfer.prototype.setData.call(dtInstance, 'text/html', dirtyHtml);
+    assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled');
+  });
+
+  console.log(`\n========================================`);
+  console.log(`Test Results: ${passed} passed, ${failed} failed`);
+  console.log(`========================================\n`);
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+})();
+
