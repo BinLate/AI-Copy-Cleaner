@@ -3,18 +3,16 @@
   'use strict';
   let enabled = true;
 
-  function syncFlag(value) {
-    enabled = value !== false;
-    try { localStorage.setItem('aicc_clean_enabled', enabled ? '1' : '0'); } catch (_) {}
-    window.dispatchEvent(new CustomEvent('aicc-clean-setting', { detail: enabled }));
-  }
-
   try {
     chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
-      if (!chrome.runtime.lastError) syncFlag(items.autoCleanEnabled);
+      if (!chrome.runtime.lastError) {
+        enabled = items.autoCleanEnabled !== false;
+      }
     });
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'sync' && changes.autoCleanEnabled) syncFlag(changes.autoCleanEnabled.newValue);
+      if (area === 'sync' && changes.autoCleanEnabled) {
+        enabled = changes.autoCleanEnabled.newValue !== false;
+      }
     });
   } catch (_) {}
 
@@ -27,8 +25,6 @@
     } catch (_) {}
     showToast('✨ Đã làm sạch HTML khi copy');
   }
-
-  window.addEventListener('ai-copy-cleaner-auto-cleaned', () => recordCleanAction());
 
   document.addEventListener('copy', (event) => {
     if (!enabled || typeof cleanAIHtml !== 'function') return;

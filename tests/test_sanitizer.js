@@ -4,6 +4,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 // Load sanitizer module
 const sanitizerPath = path.join(__dirname, '..', 'src', 'utils', 'sanitizer.js');
@@ -87,7 +88,7 @@ it('Preserves safe href, target, title, rel on <a> and safe src, alt on <img>', 
   assert.ok(clean.includes('alt="Dot"'));
 });
 
-// 7. Security B001: Attribute injection through href and src escaping
+// 7. Security: Attribute injection through href and src escaping
 it('Prevents attribute injection in href and src by escaping double quotes', () => {
   const injection = '<a href=\'https://safe.example/" onclick="alert(1)\'>Link</a><img src=\'https://safe.example/img.png" onerror="alert(2)\' alt="Test" />';
   const clean = cleanAIHtml(injection);
@@ -96,7 +97,7 @@ it('Prevents attribute injection in href and src by escaping double quotes', () 
   assert.ok(clean.includes('&quot;'), `Expected double quote escaped to &quot;: ${clean}`);
 });
 
-// 8. Security B002: Hyphenated, custom and namespaced/colon tags attribute sanitization
+// 8. Security: Hyphenated, custom and namespaced/colon tags attribute sanitization
 it('Sanitizes custom, hyphenated and colon-namespaced element tags by stripping all attributes', () => {
   const custom = '<x-custom-tag onclick="alert(1)" foo="bar"><x:custom onclick="alert(2)" data-test="yes"><my-element class="bad">Text</my-element></x:custom></x-custom-tag>';
   const clean = cleanAIHtml(custom);
@@ -124,7 +125,6 @@ it('Handles duplicate attributes following HTML parser specification (first occu
 
 // 10. Parity & Security: Comprehensive Character Reference & Entity Decoding
 it('Decodes semicolonless, hex, decimal and named character references in URLs before safety validation', () => {
-  // Semicoloned and semicolonless decimal/hex
   const decSemi = '<a href="https&#58;//example.com">x</a>';
   assert.strictEqual(cleanAIHtml(decSemi), '<a href="https://example.com">x</a>');
 
@@ -137,14 +137,12 @@ it('Decodes semicolonless, hex, decimal and named character references in URLs b
   const hexNoSemi = '<a href="https&#x3a//example.com">x</a>';
   assert.strictEqual(cleanAIHtml(hexNoSemi), '<a href="https://example.com">x</a>');
 
-  // Named entities (&colon;, &sol;, &Tab;)
   const namedEntities = '<a href="https&colon;&sol;&sol;example.com">x</a>';
   assert.strictEqual(cleanAIHtml(namedEntities), '<a href="https://example.com">x</a>');
 
   const tabEntity = '<a href="https&Tab;://example.com">x</a>';
   assert.strictEqual(cleanAIHtml(tabEntity), '<a href="https://example.com">x</a>');
 
-  // Malicious javascript: via character entities
   const maliciousDec = '<a href="jav&#97;script:alert(1)">bad</a>';
   assert.strictEqual(cleanAIHtml(maliciousDec), '<a>bad</a>');
 
@@ -188,7 +186,60 @@ it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', 
   assert.strictEqual(globalThis.cleanAIHtml, originalClean, 'globalThis.cleanAIHtml must be immutable');
 });
 
-// 14. Manifest V3 & Codebase Reference Integrity
+// 14. Browser-Level MAIN World Injection & Hostile Page Script Tamper Resistance Test
+it('Validates inject.js cannot be bypassed or disabled by hostile page scripts emitting events or tampering globals', () => {
+  // Simulate browser environment with navigator.clipboard and DataTransfer
+  const events = [];
+  let capturedData = null;
+  const mockDataTransfer = {
+    setData(format, data) {
+      capturedData = { format, data };
+    }
+  };
+
+  const sandbox = {
+    window: {
+      addEventListener: (type, handler) => events.push({ type, handler }),
+      dispatchEvent: (e) => events.forEach(ev => ev.type === e.type && ev.handler(e)),
+      DataTransfer: function() {}
+    },
+    navigator: {
+      clipboard: {
+        write: async (items) => items
+      }
+    },
+    globalThis: {},
+    console: console,
+    cleanAIHtml: cleanAIHtml,
+    Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts?.type; } text() { return Promise.resolve(this.parts.join('')); } },
+    ClipboardItem: class { constructor(types) { this.types = types; } }
+  };
+  sandbox.window.DataTransfer.prototype = mockDataTransfer;
+  sandbox.globalThis = sandbox.window;
+
+  // Run sanitizer and inject in sandbox
+  const sanitizerCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'utils', 'sanitizer.js'), 'utf-8');
+  const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
+  vm.runInNewContext(sanitizerCode, sandbox);
+  vm.runInNewContext(injectCode, sandbox);
+
+  // Hostile page attempts to forge an event to disable cleaning or overwrite global
+  sandbox.window.dispatchEvent({ type: 'aicc-clean-setting', detail: false });
+  try { sandbox.window.cleanAIHtml = (x) => x; } catch (_) {}
+
+  // Hostile page attempts to set malicious HTML via DataTransfer.setData
+  const maliciousHTML = '<p>Test <img src=x onerror="alert(1)"><script>alert(2)</script><template><script>alert(3)</script></template></p>';
+  sandbox.window.DataTransfer.prototype.setData('text/html', maliciousHTML);
+
+  // Verify that sanitization was NOT bypassed despite hostile page actions
+  assert.ok(capturedData !== null, 'DataTransfer.setData must be intercepted');
+  assert.ok(!capturedData.data.includes('onerror'), `Hostile event could not bypass sanitization: ${capturedData.data}`);
+  assert.ok(!capturedData.data.includes('<script>'), `Script must be stripped: ${capturedData.data}`);
+  assert.ok(!capturedData.data.includes('<template>'), `Template must be stripped: ${capturedData.data}`);
+  assert.ok(capturedData.data.includes('<p>Test <img></p>'), `Clean HTML preserved: ${capturedData.data}`);
+});
+
+// 15. Manifest V3 & Codebase Reference Integrity
 it('Validates manifest.json integrity and ensures all referenced files exist', () => {
   const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf-8');
   const manifest = JSON.parse(manifestRaw);
