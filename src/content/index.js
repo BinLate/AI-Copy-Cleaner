@@ -32,7 +32,26 @@
     } catch (_) {}
   }
 
-  function sameConversationUrl(url1, url2) {
+  function extractConversationId(urlOrPath) {
+    if (!urlOrPath) return null;
+    try {
+      const path = (urlOrPath.includes('://') ? new URL(urlOrPath, location.origin).pathname : urlOrPath).toLowerCase();
+      const match = path.match(/(?:\/c\/|\/share\/|\/canvas\/c\/|\/conversation\/|\/shared_conversation\/)([^/?#]+)/i);
+      return match ? decodeURIComponent(match[1]) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function currentConversationId() {
+    return extractConversationId(location.pathname);
+  }
+
+  function isSameConversation(url1, url2, convId1, convId2) {
+    if (convId1 && convId2 && convId1.toLowerCase() === convId2.toLowerCase()) return true;
+    const id1 = convId1 || extractConversationId(url1);
+    const id2 = convId2 || extractConversationId(url2);
+    if (id1 && id2 && id1.toLowerCase() === id2.toLowerCase()) return true;
     if (!url1 || !url2) return false;
     if (url1 === url2) return true;
     try {
@@ -47,7 +66,15 @@
   function getExtra() {
     try {
       const value = JSON.parse(localStorage.getItem(EXTRA_KEY) || 'null');
-      return value && sameConversationUrl(value.url, location.href) ? Math.max(0, parseInt(value.extra, 10) || 0) : 0;
+      if (!value) return 0;
+      const curId = currentConversationId();
+      if (value.conversationId && curId && value.conversationId.toLowerCase() === curId.toLowerCase()) {
+        return Math.max(0, parseInt(value.extra, 10) || 0);
+      }
+      if (isSameConversation(value.url, location.href, value.conversationId, curId)) {
+        return Math.max(0, parseInt(value.extra, 10) || 0);
+      }
+      return 0;
     } catch (_) {
       return 0;
     }
@@ -55,15 +82,22 @@
 
   function setExtra(extra) {
     try {
-      if (extra > 0) localStorage.setItem(EXTRA_KEY, JSON.stringify({ url: location.href, extra }));
-      else localStorage.removeItem(EXTRA_KEY);
+      if (extra > 0) {
+        localStorage.setItem(EXTRA_KEY, JSON.stringify({
+          url: location.href,
+          conversationId: currentConversationId(),
+          extra
+        }));
+      } else {
+        localStorage.removeItem(EXTRA_KEY);
+      }
     } catch (_) {}
   }
 
   function firstTurnId() {
-    const items = document.querySelectorAll('[data-turn-id-container], article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"]');
+    const items = document.querySelectorAll('[data-turn-id-container], article[data-testid^="conversation-turn-"], [data-testid^="conversation-turn-"], [data-message-author-role]');
     for (const el of items) {
-      const id = el.getAttribute('data-turn-id-container') || el.getAttribute('data-testid');
+      const id = el.getAttribute('data-turn-id-container') || el.getAttribute('data-testid') || el.getAttribute('data-message-id');
       if (id) return id;
     }
     return null;
@@ -71,20 +105,23 @@
 
   function saveScrollAnchor() {
     try {
-      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ url: location.href, anchor: firstTurnId() }));
+      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ url: location.href, conversationId: currentConversationId(), anchor: firstTurnId() }));
     } catch (_) {}
   }
 
   function restoreScrollAnchor() {
     let saved;
     try { saved = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null'); } catch (_) { return; }
-    if (!saved || !sameConversationUrl(saved.url, location.href) || !saved.anchor) return;
+    const curId = currentConversationId();
+    if (!saved || !isSameConversation(saved.url, location.href, saved.conversationId, curId) || !saved.anchor) return;
 
     let tries = 0;
     const timer = setInterval(() => {
       tries++;
       const safe = globalThis.CSS?.escape ? CSS.escape(saved.anchor) : saved.anchor.replace(/"/g, '\\"');
-      const el = document.querySelector(`[data-turn-id-container="${safe}"]`) || document.querySelector(`[data-testid="${safe}"]`);
+      const el = document.querySelector(`[data-turn-id-container="${safe}"]`) ||
+                 document.querySelector(`[data-testid="${safe}"]`) ||
+                 document.querySelector(`[data-message-id="${safe}"]`);
       if (el) {
         clearInterval(timer);
         try { sessionStorage.removeItem(SCROLL_KEY); } catch (_) {}
@@ -103,12 +140,20 @@
   }
 
   function findMessagesContainer() {
-    const turn = document.querySelector('div[data-turn-id-container], article[data-testid^="conversation-turn-"], div[data-testid^="conversation-turn-"]');
+    const turn = document.querySelector(
+      'div[data-turn-id-container], article[data-testid^="conversation-turn-"], div[data-testid^="conversation-turn-"], [data-message-author-role]'
+    );
     if (turn?.parentElement) return turn.parentElement;
     const main = document.querySelector('main');
     if (main) {
-      const scrollable = main.querySelector('div[class*="react-scroll-to-bottom"], div[class*="overflow-y-auto"]');
-      if (scrollable) return scrollable;
+      const scrollable = main.querySelector(
+        'div[class*="react-scroll-to-bottom"], div[class*="overflow-y-auto"], div[class*="conversation-items"], div.flex-1.overflow-hidden'
+      );
+      if (scrollable) {
+        const inner = scrollable.querySelector('div.flex.flex-col') || scrollable;
+        return inner;
+      }
+      return main;
     }
     return null;
   }
@@ -228,13 +273,20 @@
       }));
     }
 
-    const firstTurn = container.querySelector(':scope > [data-turn-id-container], :scope > [data-testid^="conversation-turn-"], :scope > article');
+    const firstTurn = container.querySelector(
+      ':scope > [data-turn-id-container], :scope > [data-testid^="conversation-turn-"], :scope > article, :scope > [data-message-author-role]'
+    );
     container.insertBefore(wrapper, firstTurn || container.firstChild);
     controls = wrapper;
   }
 
   function acceptStatus(payload) {
-    if (!payload || !sameConversationUrl(payload.url, location.href)) return;
+    if (!payload) return;
+    const curId = currentConversationId();
+    const matches = isSameConversation(payload.url, location.href, payload.conversationId, curId) ||
+                    (payload.conversationId && curId && payload.conversationId.toLowerCase() === curId.toLowerCase()) ||
+                    (!curId && payload.conversationId);
+    if (!matches) return;
     status = payload;
     ensureControls();
     restoreScrollAnchor();
@@ -249,7 +301,12 @@
     settings = normalize(result[OPT_KEY]);
     syncConfig();
     try {
-      const cached = JSON.parse(sessionStorage.getItem(LAST_STATUS_KEY) || 'null');
+      const curId = currentConversationId();
+      const cached = JSON.parse(
+        (curId ? sessionStorage.getItem(`aicc_fixlag_status_${curId}`) : null) ||
+        sessionStorage.getItem(LAST_STATUS_KEY) ||
+        'null'
+      );
       if (cached) acceptStatus(cached);
     } catch (_) {}
   });
@@ -262,18 +319,42 @@
   });
 
   let lastUrl = location.href;
-  setInterval(() => {
-    if (location.href !== lastUrl) {
+  let lastConvId = currentConversationId();
+
+  function checkRouteChange() {
+    const curConvId = currentConversationId();
+    if (location.href !== lastUrl || curConvId !== lastConvId) {
+      const isDifferentConv = (curConvId && lastConvId && curConvId !== lastConvId) ||
+                              (!curConvId && lastConvId && !location.pathname.includes('/c/'));
       lastUrl = location.href;
-      status = null;
-      removeControls();
-      try {
-        const extra = JSON.parse(localStorage.getItem(EXTRA_KEY) || 'null');
-        if (extra && !sameConversationUrl(extra.url, location.href)) localStorage.removeItem(EXTRA_KEY);
-      } catch (_) {}
+      lastConvId = curConvId;
+
+      if (isDifferentConv) {
+        status = null;
+        removeControls();
+        try {
+          const extra = JSON.parse(localStorage.getItem(EXTRA_KEY) || 'null');
+          if (extra && !isSameConversation(extra.url, location.href, extra.conversationId, curConvId)) {
+            localStorage.removeItem(EXTRA_KEY);
+          }
+        } catch (_) {}
+      }
+
+      if (!status && curConvId) {
+        try {
+          const cached = JSON.parse(
+            sessionStorage.getItem(`aicc_fixlag_status_${curConvId}`) ||
+            sessionStorage.getItem(LAST_STATUS_KEY) ||
+            'null'
+          );
+          if (cached) acceptStatus(cached);
+        } catch (_) {}
+      }
     }
     if (status && !controls?.isConnected) ensureControls();
-  }, 1000);
+  }
+
+  setInterval(checkRouteChange, 600);
 
   // MutationObserver to attach controls as soon as the DOM renders
   if (typeof MutationObserver !== 'undefined') {

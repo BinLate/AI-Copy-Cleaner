@@ -37,9 +37,8 @@ async function testAsync(name, fn) {
   }
 }
 
-// Emulate helper functions from mainWorld.js
+// Emulate helper functions from mainWorld.js and index.js
 const HIDDEN_ROLES = new Set(['system', 'tool', 'thinking']);
-const PAGE_CONV = /(?:\/c\/|\/g\/[^/]+\/c\/)([^/?#]+)/i;
 
 function nodeRole(node) {
   const role = node?.message?.author?.role || node?.message?.role || node?.role || '';
@@ -191,16 +190,30 @@ function trimConversation(data, baseLimit, extra) {
   };
 }
 
+function extractConversationId(urlOrPath) {
+  if (!urlOrPath) return null;
+  try {
+    const path = (urlOrPath.includes('://') ? new URL(urlOrPath, 'https://chatgpt.com').pathname : urlOrPath).toLowerCase();
+    const match = path.match(/(?:\/c\/|\/share\/|\/canvas\/c\/|\/conversation\/|\/shared_conversation\/)([^/?#]+)/i);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function isPotentialConversationPath(pathname) {
   if (!pathname || typeof pathname !== 'string') return false;
   const lower = pathname.toLowerCase();
   if (/\.(?:js|css|png|jpe?g|svg|woff2?|wasm|ico|json|map)(?:\?|$)/i.test(lower)) return false;
-  if (lower.includes('/conversations')) return false;
-  if (lower.includes('/conversation_limit') || lower.includes('/stream_status') || lower.includes('/textdocs')) return false;
-  return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|shared_conversation)\/[^/]+/i.test(lower);
+  if (lower.includes('/conversations') || lower.includes('/conversation_limit') || lower.includes('/stream_status') || lower.includes('/textdocs') || lower.includes('/synthesize')) return false;
+  return /\/(?:backend-api|backend-anon)\/(?:.*?\/)?(?:conversation|shared_conversation)\/[^/?#]+/i.test(lower);
 }
 
-function sameConversationUrl(url1, url2) {
+function isSameConversation(url1, url2, convId1, convId2) {
+  if (convId1 && convId2 && convId1.toLowerCase() === convId2.toLowerCase()) return true;
+  const id1 = convId1 || extractConversationId(url1);
+  const id2 = convId2 || extractConversationId(url2);
+  if (id1 && id2 && id1.toLowerCase() === id2.toLowerCase()) return true;
   if (!url1 || !url2) return false;
   if (url1 === url2) return true;
   try {
@@ -322,12 +335,14 @@ function createMockConversation(turnCount) {
   });
 
   // 3. Endpoint matching regex
-  test('Matches standard and frontend-proxied conversation GET endpoints', () => {
+  test('Matches standard, GPTs, gizmos, and workspace projects conversation GET endpoints', () => {
     assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345'), true);
     assert.strictEqual(isPotentialConversationPath('/backend-api/f/conversation/12345'), true);
     assert.strictEqual(isPotentialConversationPath('/backend-anon/conversation/12345'), true);
     assert.strictEqual(isPotentialConversationPath('/backend-anon/f/conversation/12345'), true);
     assert.strictEqual(isPotentialConversationPath('/backend-api/shared_conversation/12345'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/gizmos/g-p-12345/conversation/67890'), true);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/projects/proj-abc/conversation/67890'), true);
     assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345?model=gpt-4o'), true);
   });
 
@@ -336,23 +351,31 @@ function createMockConversation(turnCount) {
     assert.strictEqual(isPotentialConversationPath('/backend-api/conversation_limit'), false);
     assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/stream_status'), false);
     assert.strictEqual(isPotentialConversationPath('/backend-api/conversation/12345/textdocs'), false);
+    assert.strictEqual(isPotentialConversationPath('/backend-api/synthesize?message_id=123'), false);
     assert.strictEqual(isPotentialConversationPath('/assets/index.js'), false);
   });
 
-  // 4. Conversation ID extraction from URL
-  test('Extracts conversation ID from standard and Custom GPT paths', () => {
-    const match1 = '/c/67a12345-abcd'.match(PAGE_CONV);
-    assert.strictEqual(match1[1], '67a12345-abcd');
-
-    const match2 = '/g/g-abc12345/c/67a99999-wxyz'.match(PAGE_CONV);
-    assert.strictEqual(match2[1], '67a99999-wxyz');
+  // 4. Conversation ID extraction from various ChatGPT URL formats
+  test('Extracts conversation ID from standard, GPTs, Projects, Share and Canvas paths', () => {
+    assert.strictEqual(extractConversationId('/c/67a12345-abcd'), '67a12345-abcd');
+    assert.strictEqual(extractConversationId('/g/g-abc12345/c/67a99999-wxyz'), '67a99999-wxyz');
+    assert.strictEqual(extractConversationId('/projects/proj-123/c/67a55555-mmmm'), '67a55555-mmmm');
+    assert.strictEqual(extractConversationId('/share/67a88888-qqqq'), '67a88888-qqqq');
+    assert.strictEqual(extractConversationId('/canvas/c/67a77777-cccc'), '67a77777-cccc');
   });
 
-  // 5. sameConversationUrl normalization
-  test('Normalizes and matches conversation URLs correctly', () => {
-    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/12345/'), true);
-    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345?model=4o', 'https://chatgpt.com/c/12345#bottom'), true);
-    assert.strictEqual(sameConversationUrl('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/67890'), false);
+  // 5. isSameConversation matching
+  test('Matches conversations accurately across SPA pushState transitions and URL variants', () => {
+    // Exact URL match
+    assert.strictEqual(isSameConversation('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/12345/'), true);
+    assert.strictEqual(isSameConversation('https://chatgpt.com/c/12345?model=4o', 'https://chatgpt.com/c/12345#bottom'), true);
+
+    // Matching via conversationId when root URL is transitioning to /c/12345
+    assert.strictEqual(isSameConversation('https://chatgpt.com/', 'https://chatgpt.com/c/test-uuid-1234', 'test-uuid-1234', 'test-uuid-1234'), true);
+    assert.strictEqual(isSameConversation('https://chatgpt.com/c/test-uuid-1234', 'https://chatgpt.com/g/g-abc/c/test-uuid-1234'), true);
+
+    // Different conversations
+    assert.strictEqual(isSameConversation('https://chatgpt.com/c/12345', 'https://chatgpt.com/c/67890'), false);
   });
 
   // 6. Integration Test: mainWorld.js XHR and Fetch Interception Execution
@@ -403,6 +426,7 @@ function createMockConversation(turnCount) {
       configurable: true
     });
 
+    let postedStatus = null;
     const sandbox = {
       window: {
         location: { href: 'https://chatgpt.com/c/test-uuid-1234', pathname: '/c/test-uuid-1234', origin: 'https://chatgpt.com' },
@@ -416,7 +440,11 @@ function createMockConversation(turnCount) {
             };
           }
         }),
-        postMessage: () => {},
+        postMessage: (msg) => {
+          if (msg?.type === 'aicc-fixlag-status') {
+            postedStatus = msg.payload;
+          }
+        },
         XMLHttpRequest: MockXHR
       },
       document: {
@@ -458,6 +486,10 @@ function createMockConversation(turnCount) {
     const fetchResponse = await sandbox.window.fetch('https://chatgpt.com/backend-api/conversation/test-uuid-1234');
     const trimmedData = await fetchResponse.json();
     assert.strictEqual(Object.keys(trimmedData.mapping).length, 31); // 1 root + 15 user + 15 assistant = 31
+    assert.strictEqual(postedStatus.conversationId, 'test-uuid-1234');
+    assert.strictEqual(postedStatus.renderedTurns, 15);
+    assert.strictEqual(postedStatus.totalTurns, 30);
+    assert.strictEqual(postedStatus.hasOlderMessages, true);
 
     // Test XHR interception with responseType = 'json'
     const xhrJson = new sandbox.window.XMLHttpRequest();

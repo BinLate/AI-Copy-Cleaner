@@ -28,29 +28,6 @@
   } catch (_) {}
 
   try {
-    document.documentElement.dataset.csbExtensionUrl = chrome.runtime.getURL('');
-    document.documentElement.dataset.csbExtensionId = chrome.runtime.id;
-  } catch (_) {}
-
-  async function hashWasmLoader() {
-    try {
-      const url = chrome.runtime.getURL('src/page/wasmLoader.js');
-      const text = await (await fetch(url)).text();
-      let hash = 2166136261;
-      for (let i = 0; i < text.length; i++) {
-        const code = text.charCodeAt(i);
-        hash ^= code & 255;
-        hash = Math.imul(hash, 16777619) >>> 0;
-        hash ^= code >> 8;
-        hash = Math.imul(hash, 16777619) >>> 0;
-      }
-      document.documentElement.dataset.csbFh = (hash >>> 0).toString(16).padStart(8, '0');
-    } catch (_) {}
-  }
-
-  hashWasmLoader();
-
-  try {
     if (sessionStorage.getItem('aicc_fixlag_navigating') !== '1') {
       localStorage.removeItem('aicc_fixlag_extra');
     } else {

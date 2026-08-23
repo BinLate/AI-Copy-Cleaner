@@ -10,16 +10,10 @@
   const NAV_KEY = 'aicc_fixlag_navigating';
   const DEFAULT_CONFIG = { enabled: true, messageLimit: 15 };
   const HIDDEN_ROLES = new Set(['system', 'tool', 'thinking']);
-  const PAGE_CONV = /(?:\/c\/|\/g\/[^/]+\/c\/)([^/?#]+)/i;
   const nativeJSONParse = JSON.parse.bind(JSON);
   const nativeFetch = window.fetch.bind(window);
 
   let currentConversationId = null;
-  let resolveWasmReady;
-  window.__AICC_WASM_READY_PROMISE__ = new Promise((resolve) => {
-    resolveWasmReady = resolve;
-  });
-  window.__AICC_WASM_INITIALIZED__ = false;
   window.__AICC_TRIM_SKIP__ = null;
   window.__AICC_TRIM_LAST__ = null;
 
@@ -67,13 +61,34 @@
     return getConfig();
   }
 
-  function getExtra() {
+  function extractConversationId(urlOrPath) {
+    if (!urlOrPath) return null;
+    try {
+      const path = (urlOrPath.includes('://') ? new URL(urlOrPath, location.origin).pathname : urlOrPath).toLowerCase();
+      const match = path.match(/(?:\/c\/|\/share\/|\/canvas\/c\/|\/conversation\/|\/shared_conversation\/)([^/?#]+)/i);
+      return match ? decodeURIComponent(match[1]) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pageConversationId() {
+    return extractConversationId(location.pathname);
+  }
+
+  function getExtra(convId) {
     try {
       const value = nativeJSONParse(localStorage.getItem(EXTRA_KEY) || 'null');
       if (value) {
+        const targetConvId = convId || pageConversationId();
+        if (value.conversationId && targetConvId && value.conversationId.toLowerCase() === targetConvId.toLowerCase()) {
+          return Math.max(0, parseInt(value.extra, 10) || 0);
+        }
         const curPath = location.pathname.replace(/\/+$/, '').toLowerCase();
         const valPath = new URL(value.url || '', location.origin).pathname.replace(/\/+$/, '').toLowerCase();
-        if (curPath === valPath) return Math.max(0, parseInt(value.extra, 10) || 0);
+        if (curPath === valPath || (targetConvId && valPath.includes(targetConvId.toLowerCase()))) {
+          return Math.max(0, parseInt(value.extra, 10) || 0);
+        }
       }
     } catch (_) {}
     return 0;
@@ -105,18 +120,12 @@
     if (!pathname || typeof pathname !== 'string') return false;
     const lower = pathname.toLowerCase();
     if (/\.(?:js|css|png|jpe?g|svg|woff2?|wasm|ico|json|map)(?:\?|$)/i.test(lower)) return false;
-    if (lower.includes('/conversations')) return false;
-    if (lower.includes('/conversation_limit') || lower.includes('/stream_status') || lower.includes('/textdocs')) return false;
-    return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|shared_conversation)\/[^/]+/i.test(lower);
+    if (lower.includes('/conversations') || lower.includes('/conversation_limit') || lower.includes('/stream_status') || lower.includes('/textdocs') || lower.includes('/synthesize')) return false;
+    return /\/(?:backend-api|backend-anon)\/(?:.*?\/)?(?:conversation|shared_conversation)\/[^/?#]+/i.test(lower);
   }
 
   function isTreeGet(method, pathname) {
     return (method === 'GET' || !method) && isPotentialConversationPath(pathname);
-  }
-
-  function pageConversationId() {
-    const match = location.pathname.match(PAGE_CONV);
-    return match ? decodeURIComponent(match[1]) : null;
   }
 
   function isJsonishResponse(response) {
@@ -187,9 +196,9 @@
 
   function isPrefetchConversation(conversationId) {
     if (!conversationId) return false;
-    const match = location.pathname.match(PAGE_CONV);
-    if (!match) return false;
-    return !decodeURIComponent(match[1]).toLowerCase().includes(String(conversationId).toLowerCase());
+    const currentId = pageConversationId();
+    if (!currentId) return false;
+    return String(currentId).toLowerCase() !== String(conversationId).toLowerCase();
   }
 
   function cutIndexForUserPairs(mapping, path, keepTurns) {
@@ -319,8 +328,14 @@
   }
 
   function publishStatus(status) {
-    const payload = { ...status, url: location.href };
-    try { sessionStorage.setItem(LAST_STATUS_KEY, JSON.stringify(payload)); } catch (_) {}
+    const convId = status.conversationId || pageConversationId();
+    const payload = { ...status, conversationId: convId, url: location.href };
+    try {
+      sessionStorage.setItem(LAST_STATUS_KEY, JSON.stringify(payload));
+      if (convId) {
+        sessionStorage.setItem(`aicc_fixlag_status_${convId}`, JSON.stringify(payload));
+      }
+    } catch (_) {}
     window.postMessage({ type: 'aicc-fixlag-status', payload }, '*');
   }
 
@@ -381,7 +396,7 @@
     const config = getConfig();
     const prefetch = isPrefetchConversation(data.conversation_id);
     const switched = noteConversation(data).switched;
-    const extra = prefetch || switched ? 0 : getExtra();
+    const extra = prefetch || switched ? 0 : getExtra(data.conversation_id);
 
     window.__AICC_TRIM_LAST__ = {
       via,
@@ -463,13 +478,6 @@
       return nativeFetch(...args);
     }
 
-    if (window.__AICC_WASM_INITIALIZED__ === true && window.__AICC_WASM_READY_PROMISE__) {
-      await Promise.race([
-        window.__AICC_WASM_READY_PROMISE__,
-        new Promise((resolve) => setTimeout(resolve, 2000))
-      ]);
-    }
-
     await ensureConfigReady();
     const response = await nativeFetch(...args);
     return processConversationResponse(response);
@@ -544,19 +552,6 @@
     }
   }
 
-  async function initWasm() {
-    try {
-      if (window.WasmTrimmer && typeof window.WasmTrimmer.initialize === 'function') {
-        window.__AICC_WASM_INITIALIZED__ = !!(await window.WasmTrimmer.initialize());
-      } else {
-        window.__AICC_WASM_INITIALIZED__ = false;
-      }
-    } catch (_) {
-      window.__AICC_WASM_INITIALIZED__ = false;
-    }
-    resolveWasmReady();
-  }
-
   function scheduleBootstrap(conversationId) {
     if (!conversationId || treeGetsSeen.has(conversationId) || bootstrapInFlight.has(conversationId)) return;
     if (!getConfig().enabled) return;
@@ -593,6 +588,4 @@
       onRoute();
     }
   }, 400);
-
-  initWasm();
 })();

@@ -37,7 +37,6 @@
         "https://chat.openai.com/*"
       ],
       "js": [
-        "src/page/wasmLoader.js",
         "src/page/mainWorld.js"
       ],
       "run_at": "document_start",
@@ -87,18 +86,6 @@
         "src/content/content.js"
       ],
       "run_at": "document_start"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "src/wasm/build/trimmer.wasm",
-        "src/page/wasmLoader.js"
-      ],
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
-      ]
     }
   ],
   "action": {
