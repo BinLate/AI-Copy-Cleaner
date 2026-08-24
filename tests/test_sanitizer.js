@@ -373,11 +373,11 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-// 16. Programmatic Clipboard Interception & Bridge Handshake Pairing
-it('Validates inject.js pairs once at startup, safely passes through when uninitialized, and rejects forged sync events', async () => {
+// 16. Programmatic Clipboard Interception & Private MessagePort Communication
+it('Validates inject.js receives private MessagePort at startup, safely passes through when uninitialized, and respects private port state', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
-  let eventListeners = [];
+  let messageListeners = [];
 
   class MockDataTransfer {
     setData(format, data) {
@@ -405,20 +405,40 @@ it('Validates inject.js pairs once at startup, safely passes through when uninit
     }
   }
 
+  class MockMessagePort {
+    constructor() {
+      this.onmessage = null;
+      this._peer = null;
+    }
+    postMessage(data) {
+      if (this._peer && typeof this._peer.onmessage === 'function') {
+        this._peer.onmessage({ data });
+      }
+    }
+  }
+
+  class MockMessageChannel {
+    constructor() {
+      this.port1 = new MockMessagePort();
+      this.port2 = new MockMessagePort();
+      this.port1._peer = this.port2;
+      this.port2._peer = this.port1;
+    }
+  }
+
   const sandbox = {
     window: {
-      addEventListener: (type, fn, opts) => {
-        eventListeners.push({ type, fn, once: !!opts?.once });
+      addEventListener: (type, fn) => {
+        if (type === 'message') messageListeners.push(fn);
       },
-      dispatchEvent: (e) => {
-        const matching = eventListeners.filter(l => l.type === e.type);
-        matching.forEach(l => {
-          l.fn(e);
-          if (l.once) {
-            const idx = eventListeners.indexOf(l);
-            if (idx !== -1) eventListeners.splice(idx, 1);
-          }
-        });
+      removeEventListener: (type, fn) => {
+        if (type === 'message') {
+          const idx = messageListeners.indexOf(fn);
+          if (idx !== -1) messageListeners.splice(idx, 1);
+        }
+      },
+      postMessage: (msg, target, transfer) => {
+        messageListeners.slice().forEach(fn => fn({ data: msg, ports: transfer }));
       }
     },
     navigator: {
@@ -442,11 +462,10 @@ it('Validates inject.js pairs once at startup, safely passes through when uninit
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
   vm.runInNewContext(injectCode, sandbox);
 
-  const validToken = 'secret_session_uuid_12345';
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
   const dt = new MockDataTransfer();
 
-  // Case A: Uninitialized state before pairing -> pass-through (fails safe)
+  // Case A: Uninitialized state before MessagePort arrives -> pass-through (fails safe)
   const itemUninit = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
@@ -458,35 +477,23 @@ it('Validates inject.js pairs once at startup, safely passes through when uninit
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
   assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer uninitialized must be pass-through');
 
-  // Case B: One-time pairing handshake from content script
-  sandbox.window.dispatchEvent({
-    type: '__aicc_pair_bridge__',
-    detail: { key: validToken, enabled: false }
-  });
+  // Case B: Content script transfers private MessagePort to inject.js
+  const channel = new MockMessageChannel();
+  sandbox.window.postMessage('__aicc_init_port__', '*', [channel.port2]);
 
-  // Hostile script attempts second pairing attempt with a hostile key -> must be ignored because listener was once: true
-  sandbox.window.dispatchEvent({
-    type: '__aicc_pair_bridge__',
-    detail: { key: 'hostile_key_stolen', enabled: true }
-  });
-
-  // Hostile script attempts sync with hostile key -> rejected
-  sandbox.window.dispatchEvent({
-    type: '__aicc_sync_bridge__',
-    detail: { key: 'hostile_key_stolen', enabled: true }
-  });
+  // Hostile script attempts second port transfer -> must be ignored because listener was removed
+  const fakeChannel = new MockMessageChannel();
+  sandbox.window.postMessage('__aicc_init_port__', '*', [fakeChannel.port2]);
+  fakeChannel.port1.postMessage({ enabled: true });
 
   capturedClipboardWrite = null;
   await sandbox.navigator.clipboard.write([itemUninit]);
   const ignoredBlob = await capturedClipboardWrite[0].getType('text/html');
   const ignoredText = await ignoredBlob.text();
-  assert.strictEqual(ignoredText, dirtyHtml, 'Forged sync with invalid key must be rejected');
+  assert.strictEqual(ignoredText, dirtyHtml, 'Hostile port transfer attempt must be ignored');
 
-  // Case C: Trusted sync event from content script with validToken -> enables sanitization
-  sandbox.window.dispatchEvent({
-    type: '__aicc_sync_bridge__',
-    detail: { key: validToken, enabled: true }
-  });
+  // Case C: Trusted message over private port1 -> enables sanitization
+  channel.port1.postMessage({ enabled: true });
 
   capturedClipboardWrite = null;
   capturedDataTransfer = null;
@@ -496,16 +503,13 @@ it('Validates inject.js pairs once at startup, safely passes through when uninit
   await sandbox.navigator.clipboard.write([itemEnabled]);
   const cleanedBlob = await capturedClipboardWrite[0].getType('text/html');
   const cleanedText = await cleanedBlob.text();
-  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabled via trusted bridge sync');
+  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabled via private MessagePort');
 
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled via trusted sync');
+  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled via private MessagePort');
 
-  // Case D: Trusted sync event disabling -> pass-through
-  sandbox.window.dispatchEvent({
-    type: '__aicc_sync_bridge__',
-    detail: { key: validToken, enabled: false }
-  });
+  // Case D: Trusted message over private port1 disabling -> pass-through
+  channel.port1.postMessage({ enabled: false });
 
   capturedClipboardWrite = null;
   capturedDataTransfer = null;
@@ -515,10 +519,10 @@ it('Validates inject.js pairs once at startup, safely passes through when uninit
   await sandbox.navigator.clipboard.write([itemDisabled]);
   const disabledBlob = await capturedClipboardWrite[0].getType('text/html');
   const disabledText = await disabledBlob.text();
-  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when disabled via trusted bridge sync');
+  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when disabled via private MessagePort');
 
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via trusted sync');
+  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via private MessagePort');
 });
 
 console.log(`\n========================================`);

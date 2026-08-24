@@ -5,18 +5,21 @@
   let enabled = false;
   let stateResolved = false;
 
-  const sessionKey = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
-
-  // Immediately pair with MAIN-world inject.js at document_start before page scripts run
+  // Create private point-to-point MessageChannel and transfer port2 to MAIN world inject.js
+  let privatePort = null;
   try {
-    window.dispatchEvent(new CustomEvent('__aicc_pair_bridge__', { detail: { key: sessionKey, enabled: false } }));
+    const channel = new MessageChannel();
+    privatePort = channel.port1;
+    window.postMessage('__aicc_init_port__', '*', [channel.port2]);
   } catch (_) {}
 
   function updateEnabled(val) {
     enabled = val !== false;
     stateResolved = true;
     try {
-      window.dispatchEvent(new CustomEvent('__aicc_sync_bridge__', { detail: { key: sessionKey, enabled } }));
+      if (privatePort) {
+        privatePort.postMessage({ enabled });
+      }
     } catch (_) {}
   }
 

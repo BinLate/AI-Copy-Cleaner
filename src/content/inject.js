@@ -1,4 +1,4 @@
-/** AI Copy Cleaner - MAIN world clipboard API interception (One-Time Handshake & Safe Startup) */
+/** AI Copy Cleaner - MAIN world clipboard API interception (Private MessagePort & Safe Startup) */
 (() => {
   'use strict';
   if (window.__aiCopyCleanerInjected) return;
@@ -8,27 +8,22 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
-  // Safe default: pass-through until trusted extension storage state is pushed via paired bridge
+  // Safe default: pass-through until trusted extension storage state is pushed via private MessagePort
   let enabledState = false;
-  let secretKey = null;
 
-  const addListener = window.addEventListener?.bind(window);
-  if (addListener) {
-    addListener('__aicc_pair_bridge__', (e) => {
-      if (!secretKey && e.detail?.key) {
-        secretKey = e.detail.key;
-        if (typeof e.detail.enabled === 'boolean') {
-          enabledState = e.detail.enabled;
+  // Receive private point-to-point MessagePort from content script
+  const handlePortInit = (event) => {
+    if (event.data === '__aicc_init_port__' && event.ports?.[0]) {
+      const port = event.ports[0];
+      port.onmessage = (e) => {
+        if (typeof e.data?.enabled === 'boolean') {
+          enabledState = e.data.enabled;
         }
-      }
-    }, { once: true });
-
-    addListener('__aicc_sync_bridge__', (e) => {
-      if (secretKey && e.detail?.key === secretKey && typeof e.detail.enabled === 'boolean') {
-        enabledState = e.detail.enabled;
-      }
-    });
-  }
+      };
+      window.removeEventListener('message', handlePortInit);
+    }
+  };
+  window.addEventListener('message', handlePortInit);
 
   const originalWrite = navigator.clipboard?.write;
   if (originalWrite) {
