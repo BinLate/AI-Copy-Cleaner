@@ -22,28 +22,29 @@
     } catch (_) {}
   }
 
-  function updateEnabled(val) {
-    enabled = val !== false;
-    stateResolved = true;
-    if (enabled) {
-      injectMainWorldHooks();
-    }
-  }
-
   try {
     chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
-      if (!chrome.runtime.lastError && items) {
-        updateEnabled(items.autoCleanEnabled);
+      if (!chrome.runtime.lastError && items && !stateResolved) {
+        enabled = items.autoCleanEnabled !== false;
+        stateResolved = true;
+        if (enabled) injectMainWorldHooks();
       }
     });
     chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
-      if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined) {
-        updateEnabled(items.autoCleanEnabled);
+      if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined && !stateResolved) {
+        enabled = items.autoCleanEnabled !== false;
+        stateResolved = true;
+        if (enabled) injectMainWorldHooks();
       }
     });
     chrome.storage.onChanged.addListener((changes) => {
-      if (changes.autoCleanEnabled) {
-        updateEnabled(changes.autoCleanEnabled.newValue);
+      if (changes.autoCleanEnabled && stateResolved) {
+        const nextVal = changes.autoCleanEnabled.newValue !== false;
+        if (nextVal !== enabled) {
+          try {
+            window.location.reload();
+          } catch (_) {}
+        }
       }
     });
   } catch (_) {}

@@ -212,13 +212,14 @@ it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', 
   assert.strictEqual(globalThis.cleanAIHtml, originalClean, 'globalThis.cleanAIHtml must be immutable');
 });
 
-// 14. Isolated World Copy Event Sanitization & Controlled MAIN-World Injection
-it('Validates content.js safe pass-through startup, controlled MAIN-world script injection on ON, and pass-through on OFF', () => {
+// 14. Isolated World Copy Event Sanitization & Controlled Lifecycle with Page Reload
+it('Validates content.js safe pass-through startup, controlled MAIN-world hook injection on ON, and page reload on state toggle', () => {
   let copyListeners = [];
   let storageData = { aicc_clean_count: 0 };
   let storageSyncCb = null;
   let storageChangedListeners = [];
   let appendedScripts = [];
+  let reloaded = false;
 
   const mockDoc = {
     addEventListener: (type, fn) => {
@@ -257,6 +258,9 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world script
         rangeCount: 0,
         toString: () => 'Hello'
       }),
+      location: {
+        reload: () => { reloaded = true; }
+      },
       dispatchEvent: () => {}
     },
     chrome: {
@@ -322,11 +326,43 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world script
   assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when disabled');
   assert.strictEqual(appendedScripts.length, 0, 'Must not inject MAIN-world scripts when setting is disabled');
 
-  // Case C: Setting enabled via storage change -> injects MAIN-world scripts and sanitizes copy
+  // Case C: Setting toggled to true while page is open -> triggers page reload for deterministic lifecycle
+  reloaded = false;
   storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: true } }));
-  assert.strictEqual(appendedScripts.length, 2, 'Must inject sanitizer.js and inject.js when enabled');
-  assert.ok(appendedScripts[0].src.includes('sanitizer.js'), 'First injected script must be sanitizer.js');
-  assert.ok(appendedScripts[1].src.includes('inject.js'), 'Second injected script must be inject.js');
+  assert.strictEqual(reloaded, true, 'Toggling setting from OFF to ON must trigger page reload');
+
+  // Case D: New document session starts with autoCleanEnabled: true -> hooks injected & copy sanitized
+  const onSandbox = {
+    document: mockDoc,
+    window: {
+      getSelection: () => ({ rangeCount: 0, toString: () => 'Hello' }),
+      location: { reload: () => { reloaded = true; } },
+      dispatchEvent: () => {}
+    },
+    chrome: {
+      runtime: { getURL: (path) => `chrome-extension://mock-id/${path}` },
+      storage: {
+        sync: { get: (defs, cb) => cb({ autoCleanEnabled: true }) },
+        local: {
+          get: (defs, cb) => cb(storageData),
+          set: (data) => Object.assign(storageData, data)
+        },
+        onChanged: { addListener: (fn) => storageChangedListeners.push(fn) }
+      }
+    },
+    cleanAIHtml: cleanAIHtml,
+    console: console,
+    setTimeout: (fn) => fn(),
+    clearTimeout: () => {}
+  };
+  onSandbox.globalThis = onSandbox.window;
+  appendedScripts = [];
+  copyListeners = [];
+
+  vm.runInNewContext(contentCode, onSandbox);
+  assert.strictEqual(appendedScripts.length, 2, 'Must inject sanitizer.js and inject.js on startup when enabled');
+  assert.ok(appendedScripts[0].src.includes('sanitizer.js'), 'First script must be sanitizer.js');
+  assert.ok(appendedScripts[1].src.includes('inject.js'), 'Second script must be inject.js');
 
   clipboardSetData = {};
   defaultPrevented = false;
@@ -343,7 +379,7 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world script
   assert.strictEqual(clipboardSetData['text/html'], '<p>Hello</p>', 'Sanitized HTML placed on clipboard');
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count incremented when HTML was modified');
 
-  // Case D: When clean HTML is copied, count is not incremented
+  // Case E: When clean HTML is copied, count is not incremented
   const cleanHtml = '<p>Hello</p>';
   clipboardSetData = {};
   defaultPrevented = false;
@@ -357,6 +393,11 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world script
 
   copyListeners.forEach((fn) => fn(fakeCopyClean));
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count must not increase for already clean HTML');
+
+  // Case F: Setting toggled from true to false while page is open -> triggers page reload
+  reloaded = false;
+  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }));
+  assert.strictEqual(reloaded, true, 'Toggling setting from ON to OFF must trigger page reload');
 });
 
 // 15. Manifest V3 & Web Accessible Resources Integrity
