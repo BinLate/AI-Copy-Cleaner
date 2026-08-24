@@ -1,4 +1,4 @@
-/** AI Copy Cleaner - MAIN world clipboard API interception (Private MessagePort & Safe Startup) */
+/** AI Copy Cleaner - MAIN world clipboard API interception (Passive, Immutable & Tamper-Resistant) */
 (() => {
   'use strict';
   if (window.__aiCopyCleanerInjected) return;
@@ -8,27 +8,10 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
-  // Safe default: pass-through until trusted extension storage state is pushed via private MessagePort
-  let enabledState = false;
-
-  // Receive private point-to-point MessagePort from content script
-  const handlePortInit = (event) => {
-    if (event.data === '__aicc_init_port__' && event.ports?.[0]) {
-      const port = event.ports[0];
-      port.onmessage = (e) => {
-        if (typeof e.data?.enabled === 'boolean') {
-          enabledState = e.data.enabled;
-        }
-      };
-      window.removeEventListener('message', handlePortInit);
-    }
-  };
-  window.addEventListener('message', handlePortInit);
-
   const originalWrite = navigator.clipboard?.write;
   if (originalWrite) {
     navigator.clipboard.write = async function (items) {
-      if (!Array.isArray(items) || !enabledState) {
+      if (!Array.isArray(items)) {
         return originalWrite.apply(navigator.clipboard, arguments);
       }
       try {
@@ -57,9 +40,13 @@
   const originalSetData = window.DataTransfer?.prototype?.setData;
   if (originalSetData) {
     DataTransfer.prototype.setData = function (format, data) {
-      if (enabledState && format === 'text/html' && typeof data === 'string') {
-        const cleaned = sanitize(data);
-        return originalSetData.call(this, format, cleaned);
+      if (format === 'text/html' && typeof data === 'string') {
+        try {
+          const cleaned = sanitize(data);
+          return originalSetData.call(this, format, cleaned);
+        } catch (_) {
+          return originalSetData.call(this, format, data);
+        }
       }
       return originalSetData.call(this, format, data);
     };

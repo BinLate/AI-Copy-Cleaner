@@ -5,22 +5,9 @@
   let enabled = false;
   let stateResolved = false;
 
-  // Create private point-to-point MessageChannel and transfer port2 to MAIN world inject.js
-  let privatePort = null;
-  try {
-    const channel = new MessageChannel();
-    privatePort = channel.port1;
-    window.postMessage('__aicc_init_port__', '*', [channel.port2]);
-  } catch (_) {}
-
   function updateEnabled(val) {
     enabled = val !== false;
     stateResolved = true;
-    try {
-      if (privatePort) {
-        privatePort.postMessage({ enabled });
-      }
-    } catch (_) {}
   }
 
   try {

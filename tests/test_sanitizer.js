@@ -373,11 +373,10 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-// 16. Programmatic Clipboard Interception & Private MessagePort Communication
-it('Validates inject.js receives private MessagePort at startup, safely passes through when uninitialized, and respects private port state', async () => {
+// 16. Programmatic Clipboard Interception & Passive Tamper Resistance
+it('Validates inject.js intercepts and cleans rich HTML clipboard operations without forgeable event surfaces', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
-  let messageListeners = [];
 
   class MockDataTransfer {
     setData(format, data) {
@@ -405,41 +404,11 @@ it('Validates inject.js receives private MessagePort at startup, safely passes t
     }
   }
 
-  class MockMessagePort {
-    constructor() {
-      this.onmessage = null;
-      this._peer = null;
-    }
-    postMessage(data) {
-      if (this._peer && typeof this._peer.onmessage === 'function') {
-        this._peer.onmessage({ data });
-      }
-    }
-  }
-
-  class MockMessageChannel {
-    constructor() {
-      this.port1 = new MockMessagePort();
-      this.port2 = new MockMessagePort();
-      this.port1._peer = this.port2;
-      this.port2._peer = this.port1;
-    }
-  }
-
   const sandbox = {
     window: {
-      addEventListener: (type, fn) => {
-        if (type === 'message') messageListeners.push(fn);
-      },
-      removeEventListener: (type, fn) => {
-        if (type === 'message') {
-          const idx = messageListeners.indexOf(fn);
-          if (idx !== -1) messageListeners.splice(idx, 1);
-        }
-      },
-      postMessage: (msg, target, transfer) => {
-        messageListeners.slice().forEach(fn => fn({ data: msg, ports: transfer }));
-      }
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => {}
     },
     navigator: {
       clipboard: {
@@ -465,64 +434,22 @@ it('Validates inject.js receives private MessagePort at startup, safely passes t
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
   const dt = new MockDataTransfer();
 
-  // Case A: Uninitialized state before MessagePort arrives -> pass-through (fails safe)
-  const itemUninit = new MockClipboardItem({
+  // Case A: navigator.clipboard.write cleans dirty HTML
+  const item = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
-  await sandbox.navigator.clipboard.write([itemUninit]);
-  const uninitBlob = await capturedClipboardWrite[0].getType('text/html');
-  const uninitText = await uninitBlob.text();
-  assert.strictEqual(uninitText, dirtyHtml, 'Uninitialized inject.js must be pass-through without modifying HTML');
-
-  sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer uninitialized must be pass-through');
-
-  // Case B: Content script transfers private MessagePort to inject.js
-  const channel = new MockMessageChannel();
-  sandbox.window.postMessage('__aicc_init_port__', '*', [channel.port2]);
-
-  // Hostile script attempts second port transfer -> must be ignored because listener was removed
-  const fakeChannel = new MockMessageChannel();
-  sandbox.window.postMessage('__aicc_init_port__', '*', [fakeChannel.port2]);
-  fakeChannel.port1.postMessage({ enabled: true });
-
-  capturedClipboardWrite = null;
-  await sandbox.navigator.clipboard.write([itemUninit]);
-  const ignoredBlob = await capturedClipboardWrite[0].getType('text/html');
-  const ignoredText = await ignoredBlob.text();
-  assert.strictEqual(ignoredText, dirtyHtml, 'Hostile port transfer attempt must be ignored');
-
-  // Case C: Trusted message over private port1 -> enables sanitization
-  channel.port1.postMessage({ enabled: true });
-
-  capturedClipboardWrite = null;
-  capturedDataTransfer = null;
-  const itemEnabled = new MockClipboardItem({
-    'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
-  });
-  await sandbox.navigator.clipboard.write([itemEnabled]);
+  await sandbox.navigator.clipboard.write([item]);
   const cleanedBlob = await capturedClipboardWrite[0].getType('text/html');
   const cleanedText = await cleanedBlob.text();
-  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabled via private MessagePort');
+  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned by inject.js on programmatic clipboard write');
 
+  // Case B: DataTransfer.setData for text/html cleans dirty HTML
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled via private MessagePort');
+  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be cleaned by inject.js');
 
-  // Case D: Trusted message over private port1 disabling -> pass-through
-  channel.port1.postMessage({ enabled: false });
-
-  capturedClipboardWrite = null;
-  capturedDataTransfer = null;
-  const itemDisabled = new MockClipboardItem({
-    'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
-  });
-  await sandbox.navigator.clipboard.write([itemDisabled]);
-  const disabledBlob = await capturedClipboardWrite[0].getType('text/html');
-  const disabledText = await disabledBlob.text();
-  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when disabled via private MessagePort');
-
-  sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via private MessagePort');
+  // Case C: Non-HTML formats pass through unmodified
+  sandbox.DataTransfer.prototype.setData.call(dt, 'text/plain', 'plain text');
+  assert.strictEqual(capturedDataTransfer.data, 'plain text', 'DataTransfer text/plain must pass through unmodified');
 });
 
 console.log(`\n========================================`);
