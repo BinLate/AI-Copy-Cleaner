@@ -213,12 +213,12 @@ it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', 
 });
 
 // 14. Isolated World Copy Event Sanitization & Controlled Lifecycle with Page Reload
-it('Validates content.js safe pass-through startup, controlled MAIN-world hook injection on ON, and page reload on state toggle', () => {
+it('Validates content.js safe pass-through startup, controlled MAIN-world hook request on ON, and page reload on state toggle', () => {
   let copyListeners = [];
   let storageData = { aicc_clean_count: 0 };
   let storageSyncCb = null;
   let storageChangedListeners = [];
-  let appendedScripts = [];
+  let sentMessages = [];
   let reloaded = false;
 
   const mockDoc = {
@@ -226,29 +226,14 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
       if (type === 'copy') copyListeners.push(fn);
     },
     getElementById: () => null,
-    createElement: (tag) => {
-      const el = {
-        tagName: tag,
-        style: {},
-        setAttribute: () => {},
-        appendChild: () => {},
-        getBoundingClientRect: () => ({}),
-        onload: null
-      };
-      return el;
-    },
-    head: {
-      appendChild: (el) => {
-        appendedScripts.push(el);
-        if (typeof el.onload === 'function') el.onload();
-      }
-    },
-    documentElement: {
-      appendChild: (el) => {
-        appendedScripts.push(el);
-        if (typeof el.onload === 'function') el.onload();
-      }
-    }
+    createElement: () => ({
+      style: {},
+      setAttribute: () => {},
+      appendChild: () => {},
+      getBoundingClientRect: () => ({})
+    }),
+    head: { appendChild: () => {} },
+    documentElement: { appendChild: () => {} }
   };
 
   const contentSandbox = {
@@ -265,7 +250,10 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
     },
     chrome: {
       runtime: {
-        getURL: (path) => `chrome-extension://mock-id/${path}`
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (cb) cb({ ok: true });
+        }
       },
       storage: {
         sync: {
@@ -292,7 +280,7 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
 
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
 
-  // Case A: Before storage callback resolves (uninitialized startup) -> must NOT intercept and must NOT inject
+  // Case A: Before storage callback resolves (uninitialized startup) -> must NOT intercept and must NOT request hook injection
   let clipboardSetData = {};
   let defaultPrevented = false;
   const fakeCopyUninit = {
@@ -306,9 +294,9 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
   copyListeners.forEach((fn) => fn(fakeCopyUninit));
   assert.strictEqual(defaultPrevented, false, 'Uninitialized copy must be pass-through without intercepting');
   assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when uninitialized');
-  assert.strictEqual(appendedScripts.length, 0, 'Must not inject MAIN-world scripts during uninitialized startup');
+  assert.strictEqual(sentMessages.length, 0, 'Must not request MAIN-world hooks during uninitialized startup');
 
-  // Case B: Storage resolves to autoCleanEnabled: false -> copy remains pass-through, MAIN-world scripts not injected
+  // Case B: Storage resolves to autoCleanEnabled: false -> copy remains pass-through, no hook requested
   storageSyncCb({ autoCleanEnabled: false });
 
   clipboardSetData = {};
@@ -324,14 +312,14 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
   copyListeners.forEach((fn) => fn(fakeCopyDisabled));
   assert.strictEqual(defaultPrevented, false, 'Copy must be pass-through when disabled');
   assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when disabled');
-  assert.strictEqual(appendedScripts.length, 0, 'Must not inject MAIN-world scripts when setting is disabled');
+  assert.strictEqual(sentMessages.length, 0, 'Must not request MAIN-world hooks when setting is disabled');
 
   // Case C: Setting toggled to true while page is open -> triggers page reload for deterministic lifecycle
   reloaded = false;
   storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: true } }));
   assert.strictEqual(reloaded, true, 'Toggling setting from OFF to ON must trigger page reload');
 
-  // Case D: New document session starts with autoCleanEnabled: true -> hooks injected & copy sanitized
+  // Case D: New document session starts with autoCleanEnabled: true -> requests hook injection & copy sanitized
   const onSandbox = {
     document: mockDoc,
     window: {
@@ -340,7 +328,12 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
       dispatchEvent: () => {}
     },
     chrome: {
-      runtime: { getURL: (path) => `chrome-extension://mock-id/${path}` },
+      runtime: {
+        sendMessage: (msg, cb) => {
+          sentMessages.push(msg);
+          if (cb) cb({ ok: true });
+        }
+      },
       storage: {
         sync: { get: (defs, cb) => cb({ autoCleanEnabled: true }) },
         local: {
@@ -356,13 +349,12 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
     clearTimeout: () => {}
   };
   onSandbox.globalThis = onSandbox.window;
-  appendedScripts = [];
+  sentMessages = [];
   copyListeners = [];
 
   vm.runInNewContext(contentCode, onSandbox);
-  assert.strictEqual(appendedScripts.length, 2, 'Must inject sanitizer.js and inject.js on startup when enabled');
-  assert.ok(appendedScripts[0].src.includes('sanitizer.js'), 'First script must be sanitizer.js');
-  assert.ok(appendedScripts[1].src.includes('inject.js'), 'Second script must be inject.js');
+  assert.strictEqual(sentMessages.length, 1, 'Must send inject_main_world message on startup when enabled');
+  assert.strictEqual(sentMessages[0].action, 'inject_main_world');
 
   clipboardSetData = {};
   defaultPrevented = false;
@@ -400,12 +392,17 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook i
   assert.strictEqual(reloaded, true, 'Toggling setting from ON to OFF must trigger page reload');
 });
 
-// 15. Manifest V3 & Web Accessible Resources Integrity
-it('Validates manifest.json integrity, content scripts, and web_accessible_resources', () => {
+// 15. Manifest V3 & Scripting Security Integrity
+it('Validates manifest.json integrity, scripting permission, and ensures no WAR exposure for inject scripts', () => {
   const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf-8');
   const manifest = JSON.parse(manifestRaw);
   assert.strictEqual(manifest.manifest_version, 3);
   
+  // Check required permissions including scripting
+  assert.ok(manifest.permissions.includes('storage'), 'Must include storage permission');
+  assert.ok(manifest.permissions.includes('activeTab'), 'Must include activeTab permission');
+  assert.ok(manifest.permissions.includes('scripting'), 'Must include scripting permission');
+
   // Check host permissions
   const requiredHosts = [
     'https://chatgpt.com/*',
@@ -433,11 +430,8 @@ it('Validates manifest.json integrity, content scripts, and web_accessible_resou
     }
   }
 
-  // Check web_accessible_resources
-  assert.ok(Array.isArray(manifest.web_accessible_resources), 'web_accessible_resources must be defined');
-  const war = manifest.web_accessible_resources[0];
-  assert.ok(war.resources.includes('src/utils/sanitizer.js'), 'sanitizer.js must be web accessible');
-  assert.ok(war.resources.includes('src/content/inject.js'), 'inject.js must be web accessible');
+  // Security guarantee: inject.js and sanitizer.js MUST NOT be in web_accessible_resources
+  assert.strictEqual(manifest.web_accessible_resources, undefined, 'Must not expose inject.js or sanitizer.js to webpages via web_accessible_resources');
 
   // Check popup files exist
   const popupPath = path.join(__dirname, '..', manifest.action.default_popup);
@@ -445,7 +439,7 @@ it('Validates manifest.json integrity, content scripts, and web_accessible_resou
 });
 
 // 16. Programmatic Clipboard Interception & Passive Tamper Resistance
-it('Validates inject.js intercepts and cleans rich HTML clipboard operations when injected without forgeable event surfaces', async () => {
+it('Validates inject.js intercepts and cleans rich HTML clipboard operations without forgeable event surfaces', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
 
@@ -498,7 +492,7 @@ it('Validates inject.js intercepts and cleans rich HTML clipboard operations whe
   sandbox.window.DataTransfer = MockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
-  // Run inject.js in sandbox (when injected into MAIN world by extension)
+  // Run inject.js in sandbox (when injected into MAIN world by extension via chrome.scripting)
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
   vm.runInNewContext(injectCode, sandbox);
 
@@ -521,6 +515,58 @@ it('Validates inject.js intercepts and cleans rich HTML clipboard operations whe
   // Case C: Non-HTML formats pass through unmodified
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/plain', 'plain text');
   assert.strictEqual(capturedDataTransfer.data, 'plain text', 'DataTransfer text/plain must pass through unmodified');
+});
+
+// 17. Adversarial Defense: Webpage Cannot Overwrite or Force Clean Copy When OFF
+it('Validates that when Clean Copy is OFF, page scripts cannot independently load or activate MAIN-world interception', async () => {
+  const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf-8');
+  const manifest = JSON.parse(manifestRaw);
+  
+  // 1. Webpage cannot load scripts via chrome-extension:// URL because web_accessible_resources is not declared
+  assert.strictEqual(manifest.web_accessible_resources, undefined, 'No web_accessible_resources exposed');
+
+  // 2. Mock environment where Clean Copy is OFF
+  let originalWriteCalled = false;
+  let originalSetDataCalled = false;
+
+  class NativeDataTransfer {
+    setData(format, data) {
+      originalSetDataCalled = true;
+    }
+  }
+
+  const pageSandbox = {
+    window: {
+      localStorage: {},
+      document: {
+        documentElement: { dataset: {} }
+      }
+    },
+    navigator: {
+      clipboard: {
+        write: async (items) => {
+          originalWriteCalled = true;
+          return items;
+        }
+      }
+    },
+    DataTransfer: NativeDataTransfer
+  };
+  pageSandbox.globalThis = pageSandbox.window;
+
+  // Page script tries various tamper attempts (writing to localStorage, dataset, dispatching events)
+  pageSandbox.window.localStorage['aicc_clean_config'] = JSON.stringify({ enabled: true });
+  pageSandbox.window.document.documentElement.dataset.aiccCleanEnabled = 'true';
+
+  const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
+  const dt = new NativeDataTransfer();
+
+  // Test that clipboard operations remain native and untouched
+  await pageSandbox.navigator.clipboard.write([{ types: ['text/html'] }]);
+  assert.strictEqual(originalWriteCalled, true, 'Native clipboard.write must execute directly');
+
+  pageSandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
+  assert.strictEqual(originalSetDataCalled, true, 'Native DataTransfer.setData must execute directly');
 });
 
 console.log(`\n========================================`);

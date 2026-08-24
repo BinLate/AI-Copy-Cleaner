@@ -5,7 +5,8 @@
   "description": "Clean copied AI HTML across ChatGPT, Gemini, Claude, DeepSeek, Google AI Studio & Perplexity, and reduce lag in long ChatGPT conversations.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
@@ -68,24 +69,6 @@
         "src/content/content.js"
       ],
       "run_at": "document_start"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "src/utils/sanitizer.js",
-        "src/content/inject.js"
-      ],
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*",
-        "https://gemini.google.com/*",
-        "https://claude.ai/*",
-        "https://chat.deepseek.com/*",
-        "https://aistudio.google.com/*",
-        "https://*.perplexity.ai/*",
-        "https://copilot.microsoft.com/*"
-      ]
     }
   ],
   "action": {

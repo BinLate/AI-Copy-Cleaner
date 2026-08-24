@@ -19,3 +19,18 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   });
 });
+
+// Controlled MAIN-world script injection via chrome.scripting API (tamper-resistant, unexposed to webpages)
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.action === 'inject_main_world' && sender && sender.tab && typeof sender.tab.id === 'number') {
+    if (chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
+      chrome.scripting.executeScript({
+        target: { tabId: sender.tab.id, frameIds: [sender.frameId || 0] },
+        world: 'MAIN',
+        files: ['src/utils/sanitizer.js', 'src/content/inject.js']
+      }).catch(() => {});
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+});

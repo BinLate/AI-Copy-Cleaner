@@ -1,24 +1,20 @@
-/** AI Copy Cleaner - isolated world copy handler & controlled MAIN-world hook loader */
+/** AI Copy Cleaner - isolated world copy handler & controlled MAIN-world hook requester */
 (() => {
   'use strict';
   // Safe startup: uninitialized/unresolved state defaults to pass-through (disabled)
   let enabled = false;
   let stateResolved = false;
 
-  function injectMainWorldHooks() {
+  function requestMainWorldHooks() {
     if (typeof window === 'undefined' || window.__aiccMainWorldInjected) return;
     window.__aiccMainWorldInjected = true;
     try {
-      const s1 = document.createElement('script');
-      s1.src = chrome.runtime.getURL('src/utils/sanitizer.js');
-      s1.onload = () => {
-        try {
-          const s2 = document.createElement('script');
-          s2.src = chrome.runtime.getURL('src/content/inject.js');
-          (document.head || document.documentElement).appendChild(s2);
-        } catch (_) {}
-      };
-      (document.head || document.documentElement).appendChild(s1);
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+        chrome.runtime.sendMessage({ action: 'inject_main_world' }, () => {
+          // Ignore lastError if background listener completed
+          if (chrome.runtime.lastError) {}
+        });
+      }
     } catch (_) {}
   }
 
@@ -27,14 +23,14 @@
       if (!chrome.runtime.lastError && items && !stateResolved) {
         enabled = items.autoCleanEnabled !== false;
         stateResolved = true;
-        if (enabled) injectMainWorldHooks();
+        if (enabled) requestMainWorldHooks();
       }
     });
     chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
       if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined && !stateResolved) {
         enabled = items.autoCleanEnabled !== false;
         stateResolved = true;
-        if (enabled) injectMainWorldHooks();
+        if (enabled) requestMainWorldHooks();
       }
     });
     chrome.storage.onChanged.addListener((changes) => {
