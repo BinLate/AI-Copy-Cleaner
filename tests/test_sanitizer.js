@@ -373,8 +373,8 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
-// 16. Programmatic Clipboard Interception & Token-Protected State Updates
-it('Validates inject.js is safe pass-through when uninitialized and strictly rejects forged events without token', async () => {
+// 16. Programmatic Clipboard Interception & Bridge Handshake Pairing
+it('Validates inject.js pairs once at startup, safely passes through when uninitialized, and rejects forged sync events', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
   let eventListeners = [];
@@ -407,10 +407,17 @@ it('Validates inject.js is safe pass-through when uninitialized and strictly rej
 
   const sandbox = {
     window: {
-      addEventListener: (type, fn) => eventListeners.push({ type, fn }),
+      addEventListener: (type, fn, opts) => {
+        eventListeners.push({ type, fn, once: !!opts?.once });
+      },
       dispatchEvent: (e) => {
-        eventListeners.forEach(l => {
-          if (l.type === e.type) l.fn(e);
+        const matching = eventListeners.filter(l => l.type === e.type);
+        matching.forEach(l => {
+          l.fn(e);
+          if (l.once) {
+            const idx = eventListeners.indexOf(l);
+            if (idx !== -1) eventListeners.splice(idx, 1);
+          }
         });
       }
     },
@@ -431,17 +438,15 @@ it('Validates inject.js is safe pass-through when uninitialized and strictly rej
   sandbox.window.DataTransfer = MockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
-  const validToken = 'secret_test_token_xyz_123';
-
-  // Run inject.js closure with validToken
+  // Run inject.js in sandbox
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
-  const injectFn = vm.runInNewContext(injectCode, sandbox);
-  injectFn(validToken);
+  vm.runInNewContext(injectCode, sandbox);
 
+  const validToken = 'secret_session_uuid_12345';
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
   const dt = new MockDataTransfer();
 
-  // Case A: Uninitialized state -> pass-through
+  // Case A: Uninitialized state before pairing -> pass-through (fails safe)
   const itemUninit = new MockClipboardItem({
     'text/html': new MockBlob([dirtyHtml], { type: 'text/html' })
   });
@@ -453,26 +458,34 @@ it('Validates inject.js is safe pass-through when uninitialized and strictly rej
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
   assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer uninitialized must be pass-through');
 
-  // Case B: Hostile page scripts dispatching forged events without token or invalid token -> ignored
+  // Case B: One-time pairing handshake from content script
   sandbox.window.dispatchEvent({
-    type: '__aicc_state_' + validToken,
-    detail: { enabled: true, token: 'wrong_token' }
+    type: '__aicc_pair_bridge__',
+    detail: { key: validToken, enabled: false }
   });
+
+  // Hostile script attempts second pairing attempt with a hostile key -> must be ignored because listener was once: true
   sandbox.window.dispatchEvent({
-    type: '__aicc_state_forged',
-    detail: { enabled: true }
+    type: '__aicc_pair_bridge__',
+    detail: { key: 'hostile_key_stolen', enabled: true }
+  });
+
+  // Hostile script attempts sync with hostile key -> rejected
+  sandbox.window.dispatchEvent({
+    type: '__aicc_sync_bridge__',
+    detail: { key: 'hostile_key_stolen', enabled: true }
   });
 
   capturedClipboardWrite = null;
   await sandbox.navigator.clipboard.write([itemUninit]);
   const ignoredBlob = await capturedClipboardWrite[0].getType('text/html');
   const ignoredText = await ignoredBlob.text();
-  assert.strictEqual(ignoredText, dirtyHtml, 'Forged events without matching token must be ignored');
+  assert.strictEqual(ignoredText, dirtyHtml, 'Forged sync with invalid key must be rejected');
 
-  // Case C: Trusted event with validToken -> enables sanitization
+  // Case C: Trusted sync event from content script with validToken -> enables sanitization
   sandbox.window.dispatchEvent({
-    type: '__aicc_state_' + validToken,
-    detail: { enabled: true, token: validToken }
+    type: '__aicc_sync_bridge__',
+    detail: { key: validToken, enabled: true }
   });
 
   capturedClipboardWrite = null;
@@ -483,15 +496,15 @@ it('Validates inject.js is safe pass-through when uninitialized and strictly rej
   await sandbox.navigator.clipboard.write([itemEnabled]);
   const cleanedBlob = await capturedClipboardWrite[0].getType('text/html');
   const cleanedText = await cleanedBlob.text();
-  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabledState=true');
+  assert.strictEqual(cleanedText, '<p>Hello</p>', 'HTML must be cleaned when enabled via trusted bridge sync');
 
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabledState=true');
+  assert.strictEqual(capturedDataTransfer.data, '<p>Hello</p>', 'DataTransfer HTML must be sanitized when enabled via trusted sync');
 
-  // Case D: Trusted event disabling -> pass-through
+  // Case D: Trusted sync event disabling -> pass-through
   sandbox.window.dispatchEvent({
-    type: '__aicc_state_' + validToken,
-    detail: { enabled: false, token: validToken }
+    type: '__aicc_sync_bridge__',
+    detail: { key: validToken, enabled: false }
   });
 
   capturedClipboardWrite = null;
@@ -502,10 +515,10 @@ it('Validates inject.js is safe pass-through when uninitialized and strictly rej
   await sandbox.navigator.clipboard.write([itemDisabled]);
   const disabledBlob = await capturedClipboardWrite[0].getType('text/html');
   const disabledText = await disabledBlob.text();
-  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when enabledState=false');
+  assert.strictEqual(disabledText, dirtyHtml, 'HTML must remain unchanged when disabled via trusted bridge sync');
 
   sandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
-  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when enabledState=false');
+  assert.strictEqual(capturedDataTransfer.data, dirtyHtml, 'DataTransfer must not sanitize when disabled via trusted sync');
 });
 
 console.log(`\n========================================`);

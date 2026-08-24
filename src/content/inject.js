@@ -1,5 +1,5 @@
-/** AI Copy Cleaner - MAIN world clipboard API interception (Token-Protected & Safe Startup) */
-(function(sessionToken) {
+/** AI Copy Cleaner - MAIN world clipboard API interception (One-Time Handshake & Safe Startup) */
+(() => {
   'use strict';
   if (window.__aiCopyCleanerInjected) return;
   window.__aiCopyCleanerInjected = true;
@@ -8,14 +8,24 @@
   const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
   if (typeof sanitize !== 'function') return;
 
-  // Default is false (pass-through) until trusted extension storage state is pushed
+  // Safe default: pass-through until trusted extension storage state is pushed via paired bridge
   let enabledState = false;
+  let secretKey = null;
 
   const addListener = window.addEventListener?.bind(window);
-  if (addListener && sessionToken) {
-    addListener('__aicc_state_' + sessionToken, (event) => {
-      if (typeof event?.detail?.enabled === 'boolean' && event.detail?.token === sessionToken) {
-        enabledState = event.detail.enabled;
+  if (addListener) {
+    addListener('__aicc_pair_bridge__', (e) => {
+      if (!secretKey && e.detail?.key) {
+        secretKey = e.detail.key;
+        if (typeof e.detail.enabled === 'boolean') {
+          enabledState = e.detail.enabled;
+        }
+      }
+    }, { once: true });
+
+    addListener('__aicc_sync_bridge__', (e) => {
+      if (secretKey && e.detail?.key === secretKey && typeof e.detail.enabled === 'boolean') {
+        enabledState = e.detail.enabled;
       }
     });
   }
@@ -59,4 +69,4 @@
       return originalSetData.call(this, format, data);
     };
   }
-});
+})();

@@ -5,82 +5,18 @@
   let enabled = false;
   let stateResolved = false;
 
-  const sessionToken = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const sessionKey = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-  // Dynamically inject MAIN-world clipboard hook with private closure token
+  // Immediately pair with MAIN-world inject.js at document_start before page scripts run
   try {
-    const mainScript = (typeof cleanAIHtml === 'function' ? `window.cleanAIHtml = ${cleanAIHtml.toString()};\n` : '') +
-      `(${function(token) {
-        'use strict';
-        if (window.__aiCopyCleanerInjected) return;
-        window.__aiCopyCleanerInjected = true;
-
-        const sanitize = typeof cleanAIHtml === 'function' ? cleanAIHtml : (typeof window !== 'undefined' ? window.cleanAIHtml : null);
-        if (typeof sanitize !== 'function') return;
-
-        let enabledState = false;
-
-        const addListener = window.addEventListener?.bind(window);
-        if (addListener && token) {
-          addListener('__aicc_state_' + token, (event) => {
-            if (typeof event?.detail?.enabled === 'boolean' && event.detail?.token === token) {
-              enabledState = event.detail.enabled;
-            }
-          });
-        }
-
-        const originalWrite = navigator.clipboard?.write;
-        if (originalWrite) {
-          navigator.clipboard.write = async function (items) {
-            if (!Array.isArray(items) || !enabledState) {
-              return originalWrite.apply(navigator.clipboard, arguments);
-            }
-            try {
-              const output = [];
-              for (const item of items) {
-                if (item.types?.includes('text/html')) {
-                  const htmlBlob = await item.getType('text/html');
-                  const raw = await htmlBlob.text();
-                  const cleaned = sanitize(raw);
-                  const types = {};
-                  for (const type of item.types) {
-                    types[type] = type === 'text/html' ? new Blob([cleaned], { type: 'text/html' }) : await item.getType(type);
-                  }
-                  output.push(new ClipboardItem(types));
-                } else {
-                  output.push(item);
-                }
-              }
-              return originalWrite.call(navigator.clipboard, output);
-            } catch (_) {
-              return originalWrite.apply(navigator.clipboard, arguments);
-            }
-          };
-        }
-
-        const originalSetData = window.DataTransfer?.prototype?.setData;
-        if (originalSetData) {
-          DataTransfer.prototype.setData = function (format, data) {
-            if (enabledState && format === 'text/html' && typeof data === 'string') {
-              const cleaned = sanitize(data);
-              return originalSetData.call(this, format, cleaned);
-            }
-            return originalSetData.call(this, format, data);
-          };
-        }
-      }.toString()})(${JSON.stringify(sessionToken)});`;
-
-    const scriptEl = document.createElement('script');
-    scriptEl.textContent = mainScript;
-    (document.head || document.documentElement).appendChild(scriptEl);
-    scriptEl.remove();
+    window.dispatchEvent(new CustomEvent('__aicc_pair_bridge__', { detail: { key: sessionKey, enabled: false } }));
   } catch (_) {}
 
   function updateEnabled(val) {
     enabled = val !== false;
     stateResolved = true;
     try {
-      window.dispatchEvent(new CustomEvent('__aicc_state_' + sessionToken, { detail: { enabled, token: sessionToken } }));
+      window.dispatchEvent(new CustomEvent('__aicc_sync_bridge__', { detail: { key: sessionKey, enabled } }));
     } catch (_) {}
   }
 
