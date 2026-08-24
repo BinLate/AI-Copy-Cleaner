@@ -1,13 +1,33 @@
-/** AI Copy Cleaner - isolated world copy handler & UI toast */
+/** AI Copy Cleaner - isolated world copy handler & controlled MAIN-world hook loader */
 (() => {
   'use strict';
   // Safe startup: uninitialized/unresolved state defaults to pass-through (disabled)
   let enabled = false;
   let stateResolved = false;
 
+  function injectMainWorldHooks() {
+    if (typeof window === 'undefined' || window.__aiccMainWorldInjected) return;
+    window.__aiccMainWorldInjected = true;
+    try {
+      const s1 = document.createElement('script');
+      s1.src = chrome.runtime.getURL('src/utils/sanitizer.js');
+      s1.onload = () => {
+        try {
+          const s2 = document.createElement('script');
+          s2.src = chrome.runtime.getURL('src/content/inject.js');
+          (document.head || document.documentElement).appendChild(s2);
+        } catch (_) {}
+      };
+      (document.head || document.documentElement).appendChild(s1);
+    } catch (_) {}
+  }
+
   function updateEnabled(val) {
     enabled = val !== false;
     stateResolved = true;
+    if (enabled) {
+      injectMainWorldHooks();
+    }
   }
 
   try {

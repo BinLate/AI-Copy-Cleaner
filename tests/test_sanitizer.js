@@ -212,26 +212,42 @@ it('Ensures sanitizer functions cannot be mutated or overridden on globalThis', 
   assert.strictEqual(globalThis.cleanAIHtml, originalClean, 'globalThis.cleanAIHtml must be immutable');
 });
 
-// 14. Isolated World Copy Event Sanitization & Safe Startup
-it('Validates content.js is safe pass-through before storage resolution and sanitizes when enabled', () => {
+// 14. Isolated World Copy Event Sanitization & Controlled MAIN-World Injection
+it('Validates content.js safe pass-through startup, controlled MAIN-world script injection on ON, and pass-through on OFF', () => {
   let copyListeners = [];
   let storageData = { aicc_clean_count: 0 };
   let storageSyncCb = null;
   let storageChangedListeners = [];
+  let appendedScripts = [];
 
   const mockDoc = {
     addEventListener: (type, fn) => {
       if (type === 'copy') copyListeners.push(fn);
     },
     getElementById: () => null,
-    createElement: () => ({
-      style: {},
-      setAttribute: () => {},
-      appendChild: () => {},
-      getBoundingClientRect: () => ({})
-    }),
-    head: { appendChild: () => {} },
-    documentElement: { appendChild: () => {} }
+    createElement: (tag) => {
+      const el = {
+        tagName: tag,
+        style: {},
+        setAttribute: () => {},
+        appendChild: () => {},
+        getBoundingClientRect: () => ({}),
+        onload: null
+      };
+      return el;
+    },
+    head: {
+      appendChild: (el) => {
+        appendedScripts.push(el);
+        if (typeof el.onload === 'function') el.onload();
+      }
+    },
+    documentElement: {
+      appendChild: (el) => {
+        appendedScripts.push(el);
+        if (typeof el.onload === 'function') el.onload();
+      }
+    }
   };
 
   const contentSandbox = {
@@ -244,6 +260,9 @@ it('Validates content.js is safe pass-through before storage resolution and sani
       dispatchEvent: () => {}
     },
     chrome: {
+      runtime: {
+        getURL: (path) => `chrome-extension://mock-id/${path}`
+      },
       storage: {
         sync: {
           get: (defs, cb) => { storageSyncCb = cb; } // Deferred to test uninitialized state
@@ -269,7 +288,7 @@ it('Validates content.js is safe pass-through before storage resolution and sani
 
   const dirtyHtml = '<p class="junk-class" data-junk="1">Hello</p>';
 
-  // Case A: Before storage callback resolves (uninitialized startup) -> must NOT intercept (fail safe pass-through)
+  // Case A: Before storage callback resolves (uninitialized startup) -> must NOT intercept and must NOT inject
   let clipboardSetData = {};
   let defaultPrevented = false;
   const fakeCopyUninit = {
@@ -283,11 +302,32 @@ it('Validates content.js is safe pass-through before storage resolution and sani
   copyListeners.forEach((fn) => fn(fakeCopyUninit));
   assert.strictEqual(defaultPrevented, false, 'Uninitialized copy must be pass-through without intercepting');
   assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when uninitialized');
+  assert.strictEqual(appendedScripts.length, 0, 'Must not inject MAIN-world scripts during uninitialized startup');
 
-  // Resolve storage to enabled: true
-  storageSyncCb({ autoCleanEnabled: true });
+  // Case B: Storage resolves to autoCleanEnabled: false -> copy remains pass-through, MAIN-world scripts not injected
+  storageSyncCb({ autoCleanEnabled: false });
 
-  // Case B: When enabled and resolved, dirty HTML is sanitized on copy
+  clipboardSetData = {};
+  defaultPrevented = false;
+  const fakeCopyDisabled = {
+    clipboardData: {
+      getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
+      setData: (fmt, val) => { clipboardSetData[fmt] = val; }
+    },
+    preventDefault: () => { defaultPrevented = true; }
+  };
+
+  copyListeners.forEach((fn) => fn(fakeCopyDisabled));
+  assert.strictEqual(defaultPrevented, false, 'Copy must be pass-through when disabled');
+  assert.strictEqual(storageData.aicc_clean_count, 0, 'Clean count must not increase when disabled');
+  assert.strictEqual(appendedScripts.length, 0, 'Must not inject MAIN-world scripts when setting is disabled');
+
+  // Case C: Setting enabled via storage change -> injects MAIN-world scripts and sanitizes copy
+  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: true } }));
+  assert.strictEqual(appendedScripts.length, 2, 'Must inject sanitizer.js and inject.js when enabled');
+  assert.ok(appendedScripts[0].src.includes('sanitizer.js'), 'First injected script must be sanitizer.js');
+  assert.ok(appendedScripts[1].src.includes('inject.js'), 'Second injected script must be inject.js');
+
   clipboardSetData = {};
   defaultPrevented = false;
   const fakeCopyEnabled = {
@@ -303,7 +343,7 @@ it('Validates content.js is safe pass-through before storage resolution and sani
   assert.strictEqual(clipboardSetData['text/html'], '<p>Hello</p>', 'Sanitized HTML placed on clipboard');
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count incremented when HTML was modified');
 
-  // Case C: When clean HTML is copied, count is not incremented
+  // Case D: When clean HTML is copied, count is not incremented
   const cleanHtml = '<p>Hello</p>';
   clipboardSetData = {};
   defaultPrevented = false;
@@ -317,26 +357,10 @@ it('Validates content.js is safe pass-through before storage resolution and sani
 
   copyListeners.forEach((fn) => fn(fakeCopyClean));
   assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count must not increase for already clean HTML');
-
-  // Case D: When disabled via storage, copy is not intercepted
-  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }));
-  clipboardSetData = {};
-  defaultPrevented = false;
-  const fakeCopyDisabled = {
-    clipboardData: {
-      getData: (fmt) => (fmt === 'text/html' ? dirtyHtml : ''),
-      setData: (fmt, val) => { clipboardSetData[fmt] = val; }
-    },
-    preventDefault: () => { defaultPrevented = true; }
-  };
-
-  copyListeners.forEach((fn) => fn(fakeCopyDisabled));
-  assert.strictEqual(defaultPrevented, false, 'Default copy must not be intercepted when disabled');
-  assert.strictEqual(storageData.aicc_clean_count, 1, 'Clean count must not increase when disabled');
 });
 
-// 15. Manifest V3 & Codebase Reference Integrity
-it('Validates manifest.json integrity and ensures all referenced files exist', () => {
+// 15. Manifest V3 & Web Accessible Resources Integrity
+it('Validates manifest.json integrity, content scripts, and web_accessible_resources', () => {
   const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf-8');
   const manifest = JSON.parse(manifestRaw);
   assert.strictEqual(manifest.manifest_version, 3);
@@ -368,13 +392,19 @@ it('Validates manifest.json integrity and ensures all referenced files exist', (
     }
   }
 
+  // Check web_accessible_resources
+  assert.ok(Array.isArray(manifest.web_accessible_resources), 'web_accessible_resources must be defined');
+  const war = manifest.web_accessible_resources[0];
+  assert.ok(war.resources.includes('src/utils/sanitizer.js'), 'sanitizer.js must be web accessible');
+  assert.ok(war.resources.includes('src/content/inject.js'), 'inject.js must be web accessible');
+
   // Check popup files exist
   const popupPath = path.join(__dirname, '..', manifest.action.default_popup);
   assert.ok(fs.existsSync(popupPath), `Popup file not found: ${popupPath}`);
 });
 
 // 16. Programmatic Clipboard Interception & Passive Tamper Resistance
-it('Validates inject.js intercepts and cleans rich HTML clipboard operations without forgeable event surfaces', async () => {
+it('Validates inject.js intercepts and cleans rich HTML clipboard operations when injected without forgeable event surfaces', async () => {
   let capturedClipboardWrite = null;
   let capturedDataTransfer = null;
 
@@ -427,7 +457,7 @@ it('Validates inject.js intercepts and cleans rich HTML clipboard operations wit
   sandbox.window.DataTransfer = MockDataTransfer;
   sandbox.globalThis = sandbox.window;
 
-  // Run inject.js in sandbox
+  // Run inject.js in sandbox (when injected into MAIN world by extension)
   const injectCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'content', 'inject.js'), 'utf-8');
   vm.runInNewContext(injectCode, sandbox);
 
