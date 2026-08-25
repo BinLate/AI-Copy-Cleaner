@@ -8,6 +8,9 @@
 
 **Input**: Restore the ChatGPT long-conversation trim (“Fix Lag”) in AI Copy Cleaner by porting Speed Booster Toolkit v3.0.1 network-trim behavior, per `FIX-LAG-PLAN.md`. Clean-copy is out of scope.
 
+> [!IMPORTANT]
+> **Architecture Update (2026-08-25)**: The shipped architecture is a **JS-only network trimmer** inside the MAIN world (`src/page/mainWorld.js`). The WASM loader (`src/page/wasmLoader.js`), `web_accessible_resources`, `src/wasm/build/trimmer.wasm`, and the diagnostic flag `__AICC_WASM_INITIALIZED__` have been removed entirely. FR-002 below and the WASM clauses of FR-005 are historical and no longer reflect the code.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Long chats stay trimmed and load more (Priority: P1)
@@ -69,7 +72,7 @@ A fresh install (or seed with no saved optimizer settings) uses **15** turns and
 
 ### Functional Requirements
 
-- **FR-001**: Extension MUST wire `src/page/pageSetup.js` (isolated, `document_start`, first content-script) and `src/page/wasmLoader.js` (MAIN, before `mainWorld.js`) plus `web_accessible_resources` for `src/wasm/build/trimmer.wasm` and `wasmLoader.js` on ChatGPT hosts.
+- **FR-001**: Extension MUST register `src/page/pageSetup.js` (isolated world, `document_start`) and `src/page/mainWorld.js` (MAIN world, `document_start`) as content scripts on ChatGPT hosts. Conversation trimming is implemented purely in JavaScript within `mainWorld.js`.
 - **FR-002**: `pageSetup.js` MUST set `dataset.csbExtensionUrl`, `dataset.csbExtensionId`, and FNV-1a `dataset.csbFh` for `wasmLoader.js` without writing `csb_*` storage keys.
 - **FR-003**: `pageSetup.js` MUST remove `aicc_fixlag_extra` on load unless `sessionStorage.aicc_fixlag_navigating === '1'`.
 - **FR-004**: MAIN-world trim MUST keep `aicc_fixlag_config`, `aicc_fixlag_extra`, `aicc_fixlag_last_status` and existing JS trim as fallback.

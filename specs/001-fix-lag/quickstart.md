@@ -13,7 +13,6 @@ This is a **validation** guide, not implementation. Use a long thread (well over
 
 ```js
 window.__AICC_NETWORK_TRIMMER_PATCHED__   // expect true
-window.__AICC_WASM_INITIALIZED__          // may be false (SB WASM is origin-locked)
 window.__AICC_TRIM_SKIP__                 // null when a trim rewrite happened; else no-mapping | not-json | disabled | no-visible-trim | not-tree-get
 window.__AICC_TRIM_LAST__                 // { via, limit, extra, totalTurns, keptTurns, trimmed }
 localStorage.getItem('aicc_fixlag_config')
@@ -32,10 +31,10 @@ Intercepts **only** `window.fetch` for that tree GET. Do not patch `JSON.parse`,
 - Expect: only the newest ~15 turns in the scroll area; card **Tải thêm** at the top.
 - Fail: full history still on screen → note whether GET tree exists, whether `last_status.hasOlderMessages` is true, whether Optimizer is on.
 
-### 2. WASM vs JS
+### 2. Trim engine health
 
-- `__AICC_WASM_INITIALIZED__ === false` is OK if turns are still hidden.
-- Fail: WASM false **and** all turns visible → intercept or JS trim not running.
+- Trimming happens via `trimConversation()` in `mainWorld.js` immediately after the conversation tree is fetched.
+- Fail: all turns visible while `__AICC_NETWORK_TRIMMER_PATCHED__` is true → tree GET was not intercepted or failed to parse (check `__AICC_TRIM_SKIP__`).
 
 ### 3. Load more / F5
 

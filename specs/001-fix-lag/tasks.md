@@ -8,6 +8,9 @@
 
 **Organization**: First wiring pass is already in the tree. This list is the **gap-close** so old turns actually hide on ChatGPT 2026. Tasks grouped by user story.
 
+> [!NOTE]
+> **Historical (2026-08-25)**: Tasks referencing WASM — T001, T002, T004 and the `__AICC_WASM_INITIALIZED__` clause of T005 — are obsolete. The shipped architecture is a JS-only network trimmer in `src/page/mainWorld.js`; `src/page/wasmLoader.js` and `src/wasm/**` were removed.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can run in parallel (different files, no dependencies)
