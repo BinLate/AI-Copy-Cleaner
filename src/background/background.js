@@ -23,14 +23,21 @@ chrome.runtime.onInstalled.addListener(() => {
 // Controlled MAIN-world script injection via chrome.scripting API (tamper-resistant, unexposed to webpages)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.action === 'inject_main_world' && sender && sender.tab && typeof sender.tab.id === 'number') {
-    if (chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
-      chrome.scripting.executeScript({
-        target: { tabId: sender.tab.id, frameIds: [sender.frameId || 0] },
-        world: 'MAIN',
-        files: ['src/utils/sanitizer.js', 'src/content/inject.js']
-      }).catch(() => {});
+    // B002: report the REAL result - never claim success before injection completes
+    if (!chrome.scripting || typeof chrome.scripting.executeScript !== 'function') {
+      sendResponse({ ok: false, error: 'scripting_unavailable' });
+      return true;
     }
-    sendResponse({ ok: true });
+    chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id, frameIds: [sender.frameId || 0] },
+      world: 'MAIN',
+      files: ['src/utils/sanitizer.js', 'src/content/inject.js']
+    }).then(() => {
+      sendResponse({ ok: true });
+    }).catch((err) => {
+      sendResponse({ ok: false, error: String((err && err.message) || err) });
+    });
+    // Keep the message channel open for the asynchronous sendResponse above
     return true;
   }
 });

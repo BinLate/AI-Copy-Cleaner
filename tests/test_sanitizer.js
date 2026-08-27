@@ -316,7 +316,7 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook r
 
   // Case C: Setting toggled to true while page is open -> triggers page reload for deterministic lifecycle
   reloaded = false;
-  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: true } }));
+  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: true } }, 'sync'));
   assert.strictEqual(reloaded, true, 'Toggling setting from OFF to ON must trigger page reload');
 
   // Case D: New document session starts with autoCleanEnabled: true -> requests hook injection & copy sanitized
@@ -388,7 +388,7 @@ it('Validates content.js safe pass-through startup, controlled MAIN-world hook r
 
   // Case F: Setting toggled from true to false while page is open -> triggers page reload
   reloaded = false;
-  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }));
+  storageChangedListeners.forEach((fn) => fn({ autoCleanEnabled: { newValue: false } }, 'sync'));
   assert.strictEqual(reloaded, true, 'Toggling setting from ON to OFF must trigger page reload');
 });
 

@@ -5,36 +5,77 @@
   let enabled = false;
   let stateResolved = false;
 
-  function requestMainWorldHooks() {
+  // B002: track attempts so a failed injection can be retried a bounded number of times
+  let mainWorldAttempts = 0;
+  const MAX_MAIN_WORLD_ATTEMPTS = 3;
+
+  function requestMainWorldHooks(retryDelayMs) {
     if (typeof window === 'undefined' || window.__aiccMainWorldInjected) return;
-    window.__aiccMainWorldInjected = true;
+    if (mainWorldAttempts >= MAX_MAIN_WORLD_ATTEMPTS) return;
+    mainWorldAttempts++;
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
-        chrome.runtime.sendMessage({ action: 'inject_main_world' }, () => {
-          // Ignore lastError if background listener completed
-          if (chrome.runtime.lastError) {}
+        chrome.runtime.sendMessage({ action: 'inject_main_world' }, (resp) => {
+          // Reading lastError is required to avoid unchecked-error warnings
+          const err = chrome.runtime.lastError;
+          if (err || !resp || resp.ok !== true) {
+            // Injection NOT confirmed: leave marker unset and schedule one
+            // bounded retry to cover transient background/service-worker races.
+            if (mainWorldAttempts < MAX_MAIN_WORLD_ATTEMPTS) {
+              setTimeout(() => {
+                try { requestMainWorldHooks(retryDelayMs); } catch (_) {}
+              }, typeof retryDelayMs === 'number' ? retryDelayMs : 1500);
+            }
+            return;
+          }
+          // Confirmed success only now
+          window.__aiccMainWorldInjected = true;
         });
       }
     } catch (_) {}
   }
 
   try {
-    chrome.storage.sync.get({ autoCleanEnabled: true }, (items) => {
-      if (!chrome.runtime.lastError && items && !stateResolved) {
-        enabled = items.autoCleanEnabled !== false;
-        stateResolved = true;
-        if (enabled) requestMainWorldHooks();
+    // B001: storage.sync is the single authoritative source of truth (the
+    // popup loads from sync and saves to both areas). storage.local is only
+    // consulted when the sync read itself fails or the key is genuinely
+    // absent - never raced against it. Any unresolved/failed read keeps the
+    // safe pass-through default (disabled).
+    const applyResolvedValue = (value) => {
+      enabled = value !== false;
+      stateResolved = true;
+      if (enabled) requestMainWorldHooks();
+    };
+    chrome.storage.sync.get(null, (items) => {
+      if (chrome.runtime.lastError || !items) {
+        // Sync operation failed -> fall back to local
+        chrome.storage.local.get(null, (litems) => {
+          if (chrome.runtime.lastError || !litems || litems.autoCleanEnabled === undefined) {
+            // Both reads unusable -> stay pass-through (disabled)
+            stateResolved = true;
+            enabled = false;
+            return;
+          }
+          applyResolvedValue(litems.autoCleanEnabled);
+        });
+        return;
       }
-    });
-    chrome.storage.local.get({ autoCleanEnabled: true }, (items) => {
-      if (!chrome.runtime.lastError && items && items.autoCleanEnabled !== undefined && !stateResolved) {
-        enabled = items.autoCleanEnabled !== false;
-        stateResolved = true;
-        if (enabled) requestMainWorldHooks();
+      if (items.autoCleanEnabled !== undefined) {
+        applyResolvedValue(items.autoCleanEnabled);
+        return;
       }
+      // Key genuinely absent in sync -> consult local once
+      chrome.storage.local.get(null, (litems) => {
+        if (chrome.runtime.lastError || !litems) {
+          applyResolvedValue(true); // fresh-install default (ON)
+          return;
+        }
+        applyResolvedValue(litems.autoCleanEnabled === undefined ? true : litems.autoCleanEnabled);
+      });
     });
-    chrome.storage.onChanged.addListener((changes) => {
-      if (changes.autoCleanEnabled && stateResolved) {
+    // Only react to the authoritative sync area to avoid duplicate reloads
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName === 'sync' && changes.autoCleanEnabled && stateResolved) {
         const nextVal = changes.autoCleanEnabled.newValue !== false;
         if (nextVal !== enabled) {
           try {

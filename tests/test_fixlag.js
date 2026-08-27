@@ -804,4 +804,7 @@ function createMockConversation(turnCount) {
   console.log(`========================================\n`);
 
   if (failCount > 0) process.exit(1);
+  // Explicit exit: the mainWorld sandbox reuses real Node timers, so lingering
+  // intervals keep the event loop alive after the tests finish.
+  process.exit(0);
 })();
