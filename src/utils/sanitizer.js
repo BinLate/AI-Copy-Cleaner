@@ -12,6 +12,18 @@ const SAFE_LINK_REGEX = /^(?:https?:\/\/|mailto:|tel:|#|\/|\.\/|\.\.\/)/i;
 // Chỉ cho phép ảnh raster tĩnh an toàn (png, jpeg, jpg, webp, gif) - Chặn SVG data URIs chống XSS
 const SAFE_IMAGE_REGEX = /^(?:https?:\/\/|\/|data:image\/(?:png|jpeg|jpg|webp|gif);base64,)/i;
 
+/**
+ * Chuẩn hóa dấu gạch nối AI: thay thế en-dash (U+2013), em-dash (U+2014), Unicode minus (U+2212) bằng ASCII hyphen '-'.
+ * Áp dụng cho cả văn bản thường và nội dung trong <code> để đảm bảo CLI flags/identifiers luôn dùng dấu '-'.
+ * - Không thay đổi các dấu gạch ngang khác (U+2010 hyphen, U+2011 non-breaking hyphen, U+2015 horizontal bar).
+ * - Hàm pure: không thay đổi input nếu không phải chuỗi hoặc rỗng, idempotent khi gọi nhiều lần.
+ */
+const DASH_CHARS_REGEX = /[\u2013\u2014\u2212]/g;
+function normalizeDashes(s) {
+  if (typeof s !== 'string' || s.length === 0) return s;
+  return s.replace(DASH_CHARS_REGEX, '-');
+}
+
 // Strict Allowlist thuộc tính theo thẻ áp dụng đồng nhất cho cả DOM và Regex fallback
 const ALLOWED_ATTRIBUTES = {
   a: new Set(['href', 'target', 'title', 'rel']),
@@ -133,6 +145,16 @@ function cleanDOMNode(node, options) {
 
   const children = Array.from(node.childNodes);
   for (const child of children) {
+    // Text node: chuẩn hóa dấu gạch nối AI (–, —, −) → '-'. NodeType 3 không có attributes hay children
+    // nên cập nhật trực tiếp nodeValue là đủ và an toàn — DOM tree giữ nguyên, innerHTML serialize lại
+    // sẽ tự chứa ký tự ASCII. Áp dụng cho cả text bên trong <code> theo Q3 đã duyệt.
+    if (child.nodeType === 3) {
+      const original = child.nodeValue;
+      if (typeof original === 'string' && original.length > 0 && DASH_CHARS_REGEX.test(original)) {
+        child.nodeValue = original.replace(DASH_CHARS_REGEX, '-');
+      }
+      continue;
+    }
     if (child.nodeType === 1) { // Element Node
       const tagName = child.tagName.toLowerCase();
 
@@ -332,6 +354,9 @@ function cleanHtmlRegexFallback(html) {
     return `<${tagName}${attrsStr}${slashStr ? ' ' + slashStr : ''}>`;
   });
 
+  // Chuẩn hóa dấu gạch nối AI ở đầu ra cuối cùng (text thường + text trong <code>)
+  cleaned = normalizeDashes(cleaned);
+
   return cleaned.trim();
 }
 
@@ -340,7 +365,8 @@ const apiExports = Object.freeze({
   cleanAIHtml,
   isSafeUrl,
   decodeHtmlEntities,
-  normalizeUrl
+  normalizeUrl,
+  normalizeDashes
 });
 
 function defineImmutableProperty(target, name, value) {
@@ -361,12 +387,14 @@ if (typeof window !== 'undefined') {
   defineImmutableProperty(window, 'isSafeUrl', isSafeUrl);
   defineImmutableProperty(window, 'decodeHtmlEntities', decodeHtmlEntities);
   defineImmutableProperty(window, 'normalizeUrl', normalizeUrl);
+  defineImmutableProperty(window, 'normalizeDashes', normalizeDashes);
 }
 if (typeof globalThis !== 'undefined') {
   defineImmutableProperty(globalThis, 'cleanAIHtml', cleanAIHtml);
   defineImmutableProperty(globalThis, 'isSafeUrl', isSafeUrl);
   defineImmutableProperty(globalThis, 'decodeHtmlEntities', decodeHtmlEntities);
   defineImmutableProperty(globalThis, 'normalizeUrl', normalizeUrl);
+  defineImmutableProperty(globalThis, 'normalizeDashes', normalizeDashes);
 }
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = apiExports;

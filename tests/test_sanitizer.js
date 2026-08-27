@@ -22,7 +22,7 @@ global.DataTransfer = class DataTransfer {
 
 // Load sanitizer module
 const sanitizerPath = path.join(__dirname, '..', 'src', 'utils', 'sanitizer.js');
-const { cleanAIHtml, isSafeUrl, decodeHtmlEntities } = require(sanitizerPath);
+const { cleanAIHtml, isSafeUrl, decodeHtmlEntities, normalizeDashes } = require(sanitizerPath);
 
 console.log('🧪 Starting AI Copy Cleaner Full Verification, Parity & Security Test Suite...\n');
 
@@ -567,6 +567,157 @@ it('Validates that when Clean Copy is OFF, page scripts cannot independently loa
 
   pageSandbox.DataTransfer.prototype.setData.call(dt, 'text/html', dirtyHtml);
   assert.strictEqual(originalSetDataCalled, true, 'Native DataTransfer.setData must execute directly');
+});
+
+// ============================================================
+// Dash Normalization (–, —, −) → '-' feature
+// Q1: thay cả 3 ký tự | Q2: HTML + plain | Q3: kể cả trong <code>
+// ============================================================
+
+// Test 1: Direct call với cả 3 ký tự
+it('normalizeDashes: direct call replaces en/em/minus dashes with ASCII hyphen', () => {
+  assert.strictEqual(normalizeDashes('a–b—c−d'), 'a-b-c-d');
+  assert.strictEqual(normalizeDashes('range 3–5'), 'range 3-5');
+  assert.strictEqual(normalizeDashes('wow—so fast'), 'wow-so fast');
+  assert.strictEqual(normalizeDashes('x−y'), 'x-y');
+});
+
+// Test 2: Empty / non-string input — không crash, trả về input nguyên vẹn
+it('normalizeDashes: empty/non-string input is returned unchanged without throwing', () => {
+  assert.strictEqual(normalizeDashes(''), '');
+  assert.strictEqual(normalizeDashes(null), null);
+  assert.strictEqual(normalizeDashes(undefined), undefined);
+  // Số giữ nguyên (không phải string, không replace)
+  assert.strictEqual(normalizeDashes(42), 42);
+  // Object/array reference giữ nguyên (no mutation, no crash)
+  const obj = { foo: 'bar–baz' };
+  assert.strictEqual(normalizeDashes(obj), obj);
+  const arr = [1, 2, 3];
+  assert.strictEqual(normalizeDashes(arr), arr);
+});
+
+// Test 3: Idempotent — gọi 2 lần = gọi 1 lần
+it('normalizeDashes: idempotent — applying twice equals applying once', () => {
+  const input = 'page 1–5; chapter 2—3; x−y';
+  const once = normalizeDashes(input);
+  const twice = normalizeDashes(once);
+  assert.strictEqual(once, twice);
+  assert.strictEqual(once, 'page 1-5; chapter 2-3; x-y');
+});
+
+// Test 4: DOMParser path — text trong <p>. Skip nếu môi trường không có DOMParser
+// (production chạy trong extension context — luôn có DOMParser; test Node thuần
+// thì cần jsdom). Không mark là fail vì regex fallback đã được test ở Test 5.
+it('cleanAIHtml (DOMParser path): normalizes dashes in regular text content', () => {
+  let DOMParserRef = (typeof DOMParser !== 'undefined') ? DOMParser : null;
+  if (!DOMParserRef) {
+    try {
+      const { JSDOM } = require('jsdom');
+      const dom = new JSDOM('');
+      DOMParserRef = dom.window.DOMParser;
+    } catch (_) {
+      console.log('  ⏭️  SKIP: DOMParser path test (install jsdom as devDependency to enable)');
+      return;
+    }
+  }
+  const prev = global.DOMParser;
+  global.DOMParser = DOMParserRef;
+  try {
+    const dirty = '<p>foo–bar</p>';
+    const clean = cleanAIHtml(dirty);
+    assert.ok(clean.includes('foo-bar'), `Expected foo-bar in output, got: ${clean}`);
+    assert.ok(!/foo–|foo—|foo−/.test(clean), `Expected no AI dashes remain, got: ${clean}`);
+  } finally {
+    if (prev === undefined) delete global.DOMParser;
+    else global.DOMParser = prev;
+  }
+});
+
+// Test 5: Regex fallback path — text trong <p> khi DOMParser bị ẩn
+it('cleanAIHtml (regex fallback path): also normalizes dashes when DOMParser is unavailable', () => {
+  const realDOMParser = global.DOMParser;
+  try {
+    delete global.DOMParser;
+    const dirty = '<p>foo–bar</p>';
+    const clean = cleanAIHtml(dirty);
+    assert.ok(clean.includes('foo-bar'), `Expected foo-bar in regex fallback output, got: ${clean}`);
+    assert.ok(!/foo–|foo—|foo−/.test(clean), `Expected no AI dashes in regex fallback, got: ${clean}`);
+  } finally {
+    if (realDOMParser !== undefined) global.DOMParser = realDOMParser;
+  }
+});
+
+// Test 6: Entity-encoded input qua DOMParser được tự decode (browser semantics),
+// sau đó được normalize. Regex fallback path không decode entity text (đó là
+// behavior hiện tại của code, nằm ngoài scope feature này) — test riêng với raw UTF-8.
+it('cleanAIHtml: en-dash entities (DOMParser path) are decoded then normalized to ASCII hyphen', () => {
+  let DOMParserRef = (typeof DOMParser !== 'undefined') ? DOMParser : null;
+  if (!DOMParserRef) {
+    try {
+      const { JSDOM } = require('jsdom');
+      const dom = new JSDOM('');
+      DOMParserRef = dom.window.DOMParser;
+    } catch (_) {
+      console.log('  ⏭️  SKIP: entity-decoded DOMParser path (install jsdom to enable)');
+      return;
+    }
+  }
+  const prev = global.DOMParser;
+  global.DOMParser = DOMParserRef;
+  try {
+    const dirty = '<p>x&#8211;y&#8211;z&#8211;w</p>';
+    const clean = cleanAIHtml(dirty);
+    assert.ok(!/–|—|−|&#8211;|&ndash;/.test(clean),
+      `Expected all en-dash forms removed, got: ${clean}`);
+    const dashCount = (clean.match(/-/g) || []).length;
+    assert.ok(dashCount >= 4, `Expected at least 4 '-' in output, got ${dashCount} in: ${clean}`);
+  } finally {
+    if (prev === undefined) delete global.DOMParser;
+    else global.DOMParser = prev;
+  }
+});
+
+it('cleanAIHtml: raw UTF-8 en-dash (regex fallback path) is normalized to ASCII hyphen', () => {
+  const realDOMParser = global.DOMParser;
+  try {
+    delete global.DOMParser;
+    // Raw UTF-8 en/em/minus chars in text (no entity encoding). 3 input dashes → 3 output '-'.
+    const dirty = '<p>x–y—z−w</p>';
+    const clean = cleanAIHtml(dirty);
+    assert.ok(!/–|—|−/.test(clean), `Expected AI dashes removed, got: ${clean}`);
+    const dashCount = (clean.match(/-/g) || []).length;
+    assert.ok(dashCount === 3, `Expected exactly 3 '-' in output (one per input dash), got ${dashCount} in: ${clean}`);
+  } finally {
+    if (realDOMParser !== undefined) global.DOMParser = realDOMParser;
+  }
+});
+
+// Test 7: Dashes inside <code> blocks cũng bị replace (Q3)
+it('cleanAIHtml: dashes inside <code> are normalized (per Q3 decision)', () => {
+  const dirty = '<pre><code class="language-bash">npm run build–test && git push—force</code></pre>';
+  const clean = cleanAIHtml(dirty);
+  assert.ok(clean.includes('build-test'), `Expected build-test in code, got: ${clean}`);
+  assert.ok(clean.includes('push-force'), `Expected push-force in code, got: ${clean}`);
+  assert.ok(!/–|—|−/.test(clean), `Expected no AI dashes in code block, got: ${clean}`);
+  // language class vẫn được giữ
+  assert.ok(clean.includes('language-bash'), `Expected language class preserved, got: ${clean}`);
+});
+
+// Test 8: Export có sẵn trên globalThis/window qua module.exports + sandbox test
+it('normalizeDashes: exported via module.exports and accessible on globalThis in isolated sandbox', () => {
+  // module.exports check
+  assert.strictEqual(typeof normalizeDashes, 'function', 'normalizeDashes must be exported');
+
+  // Sandbox test: load module in fresh vm context, verify globalThis exposure
+  const code = fs.readFileSync(sanitizerPath, 'utf8');
+  const sandbox = { module: { exports: {} }, exports: {}, console };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox);
+  assert.strictEqual(typeof sandbox.normalizeDashes, 'function',
+    'normalizeDashes must be exposed on globalThis for content.js / inject.js consumption');
+  assert.strictEqual(sandbox.normalizeDashes('a–b—c−d'), 'a-b-c-d',
+    'Exposed normalizeDashes must behave identically to module export');
 });
 
 console.log(`\n========================================`);
