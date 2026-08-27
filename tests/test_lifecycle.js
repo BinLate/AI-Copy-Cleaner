@@ -240,6 +240,14 @@ function loadBackground(executeScriptImpl) {
     assert.strictEqual(s.getReloadCount(), 0);
   });
 
+  await it('B001: sync key absent + local read failure fails safe (OFF, no injection)', async () => {
+    const s = loadContentScript({ syncData: {}, localFails: true });
+    await sleep(20);
+    assert.strictEqual(s.sendMessageCalls.length, 0, 'local read failure must not enable hooks');
+    assert.strictEqual(s.getMarker(), false, 'marker must stay unset');
+    assert.strictEqual(s.getReloadCount(), 0);
+  });
+
   await it('B001: onChanged ignores local-area flips, reacts only to sync area', async () => {
     const s = loadContentScript({
       syncData: { autoCleanEnabled: true },

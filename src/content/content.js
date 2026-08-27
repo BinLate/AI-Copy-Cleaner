@@ -67,9 +67,13 @@
       // Key genuinely absent in sync -> consult local once
       chrome.storage.local.get(null, (litems) => {
         if (chrome.runtime.lastError || !litems) {
-          applyResolvedValue(true); // fresh-install default (ON)
+          // Local read failed -> fail-safe pass-through (disabled). A storage
+          // failure must never turn the cleaner ON.
+          stateResolved = true;
+          enabled = false;
           return;
         }
+        // Successful local read with the key missing = fresh install -> ON.
         applyResolvedValue(litems.autoCleanEnabled === undefined ? true : litems.autoCleanEnabled);
       });
     });
