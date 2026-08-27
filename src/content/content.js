@@ -129,7 +129,12 @@
         event.preventDefault();
         event.clipboardData.setData('text/html', cleaned);
         const plain = window.getSelection?.().toString() || event.clipboardData.getData('text/plain') || '';
-        if (plain) event.clipboardData.setData('text/plain', plain);
+        if (plain) {
+          // Chuẩn hóa dấu gạch nối AI trong text/plain (–, —, −) → '-'. Hàm được expose bởi sanitizer.js,
+          // nhưng có thể chưa sẵn sàng trong một số timing — guard bằng typeof check, fallback an toàn.
+          const normalizedPlain = typeof normalizeDashes === 'function' ? normalizeDashes(plain) : plain;
+          event.clipboardData.setData('text/plain', normalizedPlain);
+        }
         if (isChanged) {
           recordCleanAction();
         }
